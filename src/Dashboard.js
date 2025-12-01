@@ -197,7 +197,6 @@ const Dashboard = () => {
         deployment_frequency: deploymentSeries,
       }));
 
-      console.log("defaultMetrics:", defaultMetrics);
       setMetrics({
         deployment_frequency: {
           value: toNumber(
