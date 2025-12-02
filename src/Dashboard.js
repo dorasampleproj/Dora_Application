@@ -134,7 +134,7 @@ const Dashboard = () => {
     try {
       setLoading(true);
       const githubMetrics = await fetchGitHubMetrics();
-      const ds = dataSourcesOverride ?? dataSources;
+      const ds = dataSourcesOverride ? dataSources;
 
       // Helper to safely coerce different shapes into a number
       const toNumber = (v, fallback = 0) => {
