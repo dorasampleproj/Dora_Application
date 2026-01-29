@@ -37,10 +37,47 @@ async function calculateDeploymentFrequency(workflowRuns) {
 
 // Build a time series of deployments per day for the last `days` days
 
+// function buildDeploymentSeries(
+//   workflowRuns,
+//   days = 30,
+//   options = { includeZeros: false }
+// ) {
+//   const today = new Date();
+
+//   // Build counts per day (YYYY-MM-DD)
+//   const countsByDate = {};
+//   if (Array.isArray(workflowRuns)) {
+//     for (const run of workflowRuns) {
+//       if (!run || run.conclusion !== "success" || !run.created_at) continue;
+//       const day = new Date(run.created_at).toISOString().slice(0, 10);
+//       countsByDate[day] = (countsByDate[day] || 0) + 1;
+//     }
+//   }
+
+//   // Raw counts series (oldest -> newest)
+//   const rawSeries = new Array(days);
+//   for (let i = 0; i < days; i++) {
+//     const d = new Date(today);
+//     d.setDate(today.getDate() - (days - 1 - i));
+//     const key = d.toISOString().slice(0, 10);
+//     rawSeries[i] = { date: key, count: countsByDate[key] || 0 };
+//   }
+
+//   const totalDeploys = rawSeries.reduce((s, p) => s + (p.count || 0), 0);
+
+//   // Produce a per-day series for the full window. If a day has no deployments,
+//   const rawSeriesFiltered = rawSeries.map((p) => ({
+//     date: p.date,
+//     value: p.count || 0,
+//   }));
+
+//   return { rawSeries, rawSeriesFiltered, totalDeploys };
+// }
 function buildDeploymentSeries(
   workflowRuns,
   days = 30,
-  options = { includeZeros: false }
+  options = { includeZeros: false },
+  conclusionType = "success" // <-- new parameter
 ) {
   const today = new Date();
 
@@ -48,7 +85,7 @@ function buildDeploymentSeries(
   const countsByDate = {};
   if (Array.isArray(workflowRuns)) {
     for (const run of workflowRuns) {
-      if (!run || run.conclusion !== "success" || !run.created_at) continue;
+      if (!run || run.conclusion !== conclusionType || !run.created_at) continue;
       const day = new Date(run.created_at).toISOString().slice(0, 10);
       countsByDate[day] = (countsByDate[day] || 0) + 1;
     }
@@ -65,7 +102,7 @@ function buildDeploymentSeries(
 
   const totalDeploys = rawSeries.reduce((s, p) => s + (p.count || 0), 0);
 
-  // Produce a per-day series for the full window. If a day has no deployments,
+  // Produce a per-day series for the full window
   const rawSeriesFiltered = rawSeries.map((p) => ({
     date: p.date,
     value: p.count || 0,
@@ -73,6 +110,7 @@ function buildDeploymentSeries(
 
   return { rawSeries, rawSeriesFiltered, totalDeploys };
 }
+
 
 // Helper function to calculate lead time
 async function calculateLeadTime(pulls) {
@@ -90,11 +128,17 @@ async function calculateLeadTime(pulls) {
 }
 
 // Helper function to calculate change failure rate
-async function calculateChangeFailureRate(workflowRuns) {
+async function calculateChangeFailureRateSummary(workflowRuns) {
   if (workflowRuns.length === 0) return 0;
 
   const failedRuns = workflowRuns.filter((run) => run.conclusion === "failure");
   return (failedRuns.length / workflowRuns.length) * 100;
+}
+async function calculateChangeFailureRate(workflowRuns) {
+  if (workflowRuns.length === 0) return 0;
+
+  const failedRuns = workflowRuns.filter((run) => run.conclusion === "failure");
+  return failedRuns;
 }
 
 // Helper function to calculate MTTR
@@ -120,18 +164,10 @@ async function calculateMTTR(issues) {
 // Get all data sources
 router.get("/", async (req, res) => {
   try {
-    // For now, return the configured GitHub source
-    res.json([
-      {
-        id: 1,
-        name: "dorasampleproj",
-        type: "github",
-        config: {
-          org: OWNER,
-          repo: REPO,
-        },
-      },
-    ]);
+    // Intentionally return an empty list by default so the UI only shows
+    // data sources that the user explicitly configures or that are cached
+    // in the browser localStorage.
+    res.json([]);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -257,11 +293,8 @@ router.get("/metrics", async (req, res) => {
     // Return number of deployments per day for the last 30 days (include zeros)
     const daysWindow = 30;
     const smoothingDays = Number(req.query.smooth) || 7;
-
     // Build deployment data and keep raw counts for the full window using workflow runs
-    const deploymentResult = buildDeploymentSeries(workflowRuns, daysWindow, {
-      includeZeros: true,
-    });
+    const deploymentResult = buildDeploymentSeries(workflowRuns, 30, {}, "success");
 
     // Use the filtered raw series provided by buildDeploymentSeries (only days with deployments)
     const deploymentSeriesToClient = deploymentResult.rawSeriesFiltered; // array of {date, value}
@@ -271,8 +304,11 @@ router.get("/metrics", async (req, res) => {
     const deploymentFrequency = totalDeploys / daysWindow; // average deploys per day
     const leadTime = await calculateLeadTime(prsResponse.data);
     // Use workflowRuns if available; otherwise use syntheticRuns (which are successful deployments)
-    const runsForFailure = workflowRuns;
-    const changeFailureRate = await calculateChangeFailureRate(runsForFailure);
+    const runsForFailure = await calculateChangeFailureRate(workflowRuns);
+    const changeFailureRate = buildDeploymentSeries(workflowRuns, 30, {}, "failure");
+    const changeFailureRateToClient = changeFailureRate.rawSeriesFiltered;
+    console.log("changeFailureRate:", changeFailureRateToClient);
+    const changeFailureRateSummary = await calculateChangeFailureRateSummary(workflowRuns);
     const mttr = await calculateMTTR(issuesResponse.data);
     res.json({
       // time series for charting: raw integer counts per day (date, value)
@@ -287,8 +323,9 @@ router.get("/metrics", async (req, res) => {
         value: leadTime,
         unit: "hours",
       },
-      change_failure_rate: {
-        value: changeFailureRate,
+      change_failure_rate: changeFailureRateToClient,
+      change_failure_rate_summary: {
+        value: changeFailureRateSummary,
         unit: "percent",
       },
       mean_time_to_recovery: {
@@ -298,6 +335,47 @@ router.get("/metrics", async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+// Provide detailed items for the UI 'More Details' view
+router.get('/details', async (req, res) => {
+  try {
+    // Reuse existing helpers to fetch recent workflow runs, PRs and issues
+    const fetchWorkflowRunsLastNDays = async (owner, repo, days = 30) => {
+      const perPage = 100;
+      let page = 1;
+      let results = [];
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - days);
+      while (true) {
+        const url = `${GITHUB_API}/repos/${owner}/${repo}/actions/runs?per_page=${perPage}&page=${page}`;
+        const resp = await axios.get(url, githubConfig);
+        const runs = resp.data?.workflow_runs || [];
+        if (!runs || runs.length === 0) break;
+
+        const recent = runs.filter((r) => {
+          const created = new Date(r.created_at || null);
+          return created && created >= cutoff;
+        });
+        results = results.concat(recent);
+
+        const oldest = runs[runs.length - 1];
+        const oldestDate = oldest ? new Date(oldest.created_at || null) : null;
+        if (!oldestDate || oldestDate < cutoff) break;
+
+        page++;
+      }
+      return results;
+    };
+
+    const workflowRuns = await fetchWorkflowRunsLastNDays(OWNER, REPO, 30);
+    const prsResponse = await axios.get(`${GITHUB_API}/repos/${OWNER}/${REPO}/pulls?state=all&per_page=100`, githubConfig);
+    const issuesResponse = await axios.get(`${GITHUB_API}/repos/${OWNER}/${REPO}/issues?state=all&per_page=100`, githubConfig);
+
+    res.json({ workflow_runs: workflowRuns, pulls: prsResponse.data, issues: issuesResponse.data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
