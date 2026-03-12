@@ -4,6 +4,9 @@ const router = express.Router();
 const dotenv = require('dotenv');
 
 dotenv.config();
+
+// In-memory store for configured data-sources (simple persistence for this demo)
+const configuredDataSources = [];
 // GitHub API configuration
 const GITHUB_API = "https://api.github.com";
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
@@ -21,7 +24,7 @@ const githubConfig = {
 // Helper function to calculate deployment frequency
 async function calculateDeploymentFrequency(workflowRuns) {
   const thirtyDaysAgo = new Date();
-  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 90);
 
   console.log("backend Workflow Runs:", workflowRuns);
   const successfulDeployments = workflowRuns.filter(
@@ -29,10 +32,10 @@ async function calculateDeploymentFrequency(workflowRuns) {
       run.conclusion === "success" && new Date(run.created_at) > thirtyDaysAgo
   );
   console.log(
-    "Successful Deployments in last 30 days:",
+    "Successful Deployments in last 90 days:",
     successfulDeployments.length
   );
-  return successfulDeployments.length / 30; // deployments per day
+  return successfulDeployments.length / 90; // deployments per day
 }
 
 // Build a time series of deployments per day for the last `days` days
@@ -75,7 +78,7 @@ async function calculateDeploymentFrequency(workflowRuns) {
 // }
 function buildDeploymentSeries(
   workflowRuns,
-  days = 30,
+  days = 90,
   options = { includeZeros: false },
   conclusionType = "success" // <-- new parameter
 ) {
@@ -164,10 +167,7 @@ async function calculateMTTR(issues) {
 // Get all data sources
 router.get("/", async (req, res) => {
   try {
-    // Intentionally return an empty list by default so the UI only shows
-    // data sources that the user explicitly configures or that are cached
-    // in the browser localStorage.
-    res.json([]);
+    res.json(configuredDataSources);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -191,18 +191,24 @@ router.post("/", async (req, res) => {
   try {
     const { name, type, config } = req.body;
 
-    // Verify GitHub access
-    await axios.get(
-      `${GITHUB_API}/repos/${config.org}/${config.repo}`,
-      githubConfig
-    );
+    // If it's a GitHub datasource, verify access (best effort)
+    if (type === 'github' && config && config.org && config.repo) {
+      await axios.get(
+        `${GITHUB_API}/repos/${config.org}/${config.repo}`,
+        githubConfig
+      );
+    }
 
-    res.status(201).json({
+    const created = {
       id: Date.now(),
       name,
       type,
       config,
-    });
+    };
+
+    configuredDataSources.push(created);
+
+    res.status(201).json(created);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -212,7 +218,7 @@ router.post("/", async (req, res) => {
 router.get("/metrics", async (req, res) => {
   try {
     // Helper: fetch deployments for the last `days` days (stop paging once pages are older)
-    const fetchDeploymentsLastNDays = async (owner, repo, days = 30) => {
+    const fetchDeploymentsLastNDays = async (owner, repo, days = 90) => {
       const perPage = 100;
       let page = 1;
       let results = [];
@@ -248,7 +254,7 @@ router.get("/metrics", async (req, res) => {
     };
 
     // Helper: fetch workflow runs for the last `days` days (stop paging once pages are older)
-    const fetchWorkflowRunsLastNDays = async (owner, repo, days = 30) => {
+    const fetchWorkflowRunsLastNDays = async (owner, repo, days = 90) => {
       const perPage = 100;
       let page = 1;
       let results = [];
@@ -276,7 +282,7 @@ router.get("/metrics", async (req, res) => {
     };
 
     // Always fetch workflow runs and treat successful runs as deployments
-    const workflowRuns = await fetchWorkflowRunsLastNDays(OWNER, REPO, 30);
+    const workflowRuns = await fetchWorkflowRunsLastNDays(OWNER, REPO, 90);
     // console.log("metrics backend",workflowsResponse.data.workflow_runs);
     // Fetch pull requests
     const prsResponse = await axios.get(
@@ -290,11 +296,11 @@ router.get("/metrics", async (req, res) => {
       githubConfig
     );
 
-    // Return number of deployments per day for the last 30 days (include zeros)
-    const daysWindow = 30;
+    // Return number of deployments per day for the last 90 days (include zeros)
+    const daysWindow = 90;
     const smoothingDays = Number(req.query.smooth) || 7;
     // Build deployment data and keep raw counts for the full window using workflow runs
-    const deploymentResult = buildDeploymentSeries(workflowRuns, 30, {}, "success");
+    const deploymentResult = buildDeploymentSeries(workflowRuns, 90, {}, "success");
 
     // Use the filtered raw series provided by buildDeploymentSeries (only days with deployments)
     const deploymentSeriesToClient = deploymentResult.rawSeriesFiltered; // array of {date, value}
@@ -305,7 +311,7 @@ router.get("/metrics", async (req, res) => {
     const leadTime = await calculateLeadTime(prsResponse.data);
     // Use workflowRuns if available; otherwise use syntheticRuns (which are successful deployments)
     const runsForFailure = await calculateChangeFailureRate(workflowRuns);
-    const changeFailureRate = buildDeploymentSeries(workflowRuns, 30, {}, "failure");
+    const changeFailureRate = buildDeploymentSeries(workflowRuns, 90, {}, "failure");
     const changeFailureRateToClient = changeFailureRate.rawSeriesFiltered;
     console.log("changeFailureRate:", changeFailureRateToClient);
     const changeFailureRateSummary = await calculateChangeFailureRateSummary(workflowRuns);
@@ -342,7 +348,7 @@ router.get("/metrics", async (req, res) => {
 router.get('/details', async (req, res) => {
   try {
     // Reuse existing helpers to fetch recent workflow runs, PRs and issues
-    const fetchWorkflowRunsLastNDays = async (owner, repo, days = 30) => {
+    const fetchWorkflowRunsLastNDays = async (owner, repo, days = 90) => {
       const perPage = 100;
       let page = 1;
       let results = [];
@@ -369,7 +375,7 @@ router.get('/details', async (req, res) => {
       return results;
     };
 
-    const workflowRuns = await fetchWorkflowRunsLastNDays(OWNER, REPO, 30);
+    const workflowRuns = await fetchWorkflowRunsLastNDays(OWNER, REPO, 90);
     const prsResponse = await axios.get(`${GITHUB_API}/repos/${OWNER}/${REPO}/pulls?state=all&per_page=100`, githubConfig);
     const issuesResponse = await axios.get(`${GITHUB_API}/repos/${OWNER}/${REPO}/issues?state=all&per_page=100`, githubConfig);
 

@@ -2,13 +2,14 @@ import React, { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { MetricChart } from './MetricChart';
+import { PieChart, Pie, Cell, Legend, ResponsiveContainer } from 'recharts';
 import { Card, CardHeader, CardTitle, CardContent, Button, Badge, Input } from './components/ui';
 import { toast } from 'sonner';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
 
-function buildSeriesFromDeployments(deployments = [], days = 30, dateField = 'deploy_time') {
+function buildSeriesFromDeployments(deployments = [], days = 90, dateField = 'deploy_time') {
   const today = new Date();
   const counts = {};
   for (let i = 0; i < days; i++) {
@@ -29,9 +30,25 @@ const MetricDetails = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const params = new URLSearchParams(location.search);
-  const source = params.get('source') || 'github';
+  const urlSource = params.get('source');
+
+  // If URL doesn't provide a source, prefer the first configured datasource from sessionStorage
+  let defaultSource = 'github';
+  try {
+    const sess = sessionStorage.getItem('dora_data_sources_session');
+    if (sess) {
+      const parsed = JSON.parse(sess);
+      if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].type) {
+        defaultSource = parsed[0].type;
+      }
+    }
+  } catch (e) {
+    // ignore
+  }
+
+  const source = urlSource || defaultSource;
   const metric = params.get('metric') || 'deployment_frequency';
-  const days = Number(params.get('days') || 30);
+  const days = Number(params.get('days') || 90);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -45,6 +62,8 @@ const MetricDetails = () => {
   const [deploymentsSort, setDeploymentsSort] = useState({ key: 'date', dir: 'desc' });
   const [changesSort, setChangesSort] = useState({ key: 'created', dir: 'desc' });
   const [incidentsSort, setIncidentsSort] = useState({ key: 'opened', dir: 'desc' });
+  const [metricsData, setMetricsData] = useState({});
+  const [chartMode, setChartMode] = useState(() => (metric === 'deployment_frequency' ? 'bar' : 'bar'));
 
   const copyToClipboard = async (text) => {
     try {
@@ -80,6 +99,27 @@ const MetricDetails = () => {
     const fetchDetails = async () => {
       setLoading(true);
       setError(null);
+      // Ensure we have a configured datasource for the requested source (ask backend)
+      let matching = null;
+      try {
+        const resp = await axios.get(`${API}/data-sources`);
+        const backendList = resp.data || [];
+        matching = (backendList || []).find((s) => s && s.type === source);
+      } catch (e) {
+        // ignore and fallback to sessionStorage
+        try {
+          const sess = sessionStorage.getItem('dora_data_sources_session');
+          const parsed = sess ? JSON.parse(sess) : [];
+          matching = (parsed || []).find((s) => s && s.type === source);
+        } catch (ee) {
+          matching = null;
+        }
+      }
+      if (!matching) {
+        setError(`No configured data source for '${source}'. Configure it on the dashboard.`);
+        setLoading(false);
+        return;
+      }
       try {
         let url;
         if (source === 'servicenow') {
@@ -95,6 +135,7 @@ const MetricDetails = () => {
         const metricsPromise = axios.get(metricsUrl).then((r) => r.data || {}).catch(() => ({}));
 
         const [data, metrics] = await Promise.all([detailsPromise, metricsPromise]);
+        setMetricsData(metrics || {});
 
         const deployments = data.deployments || data.workflow_runs || [];
         const changes = data.changes || data.pulls || [];
@@ -102,14 +143,46 @@ const MetricDetails = () => {
 
         setDetails({ deployments, changes, incidents });
 
-        // Prefer a canonical series from the metrics endpoint if present
-        let builtSeries = [];
-        if (metrics && Array.isArray(metrics.deployment_frequency) && metrics.deployment_frequency.length > 0) {
-          builtSeries = metrics.deployment_frequency.map((p) => ({ date: String(p.date), value: Number(p.value || 0) }));
-        } else {
-          const dateField = source === 'servicenow' ? 'deploy_time' : (deployments[0] && deployments[0].run_started_at ? 'run_started_at' : 'created_at');
-          builtSeries = buildSeriesFromDeployments(deployments, days, dateField);
+        // Build an enriched series: for each day include deployments and PRs so tooltips can show rich info
+        const seriesByDate = {};
+        const today = new Date();
+        for (let i = 0; i < days; i++) {
+          const d = new Date(today);
+          d.setDate(today.getDate() - (days - 1 - i));
+          const key = d.toISOString().slice(0, 10);
+          seriesByDate[key] = { date: key, value: 0, deployments: [], prs: [] };
         }
+
+        // Attach deployments
+        for (const dep of deployments) {
+          const raw = dep.deploy_time || dep.run_started_at || dep.created_at || dep.created;
+          if (!raw) continue;
+          const day = new Date(raw).toISOString().slice(0, 10);
+          if (!seriesByDate[day]) continue;
+          seriesByDate[day].deployments.push(dep);
+          seriesByDate[day].value = seriesByDate[day].deployments.length;
+        }
+
+        // Attach PRs/changes
+        for (const pr of changes) {
+          const raw = pr.sys_created_on || pr.created_at || pr.created || pr.merged_at;
+          if (!raw) continue;
+          const day = new Date(raw).toISOString().slice(0, 10);
+          if (!seriesByDate[day]) continue;
+          seriesByDate[day].prs.push(pr);
+        }
+
+        // If metrics endpoint provides canonical series, prefer it but merge details where possible
+        let builtSeries = Object.values(seriesByDate);
+        if (metrics && Array.isArray(metrics.deployment_frequency) && metrics.deployment_frequency.length > 0) {
+          // map canonical series into our enriched shape
+          const m = metrics.deployment_frequency.reduce((acc, p) => {
+            acc[String(p.date).slice(0, 10)] = Number(p.value || 0);
+            return acc;
+          }, {});
+          builtSeries = builtSeries.map((s) => ({ ...s, value: m[s.date] ?? s.value }));
+        }
+
         setSeries(builtSeries);
       } catch (err) {
         console.error('Failed to fetch details', err);
@@ -120,6 +193,11 @@ const MetricDetails = () => {
     };
     fetchDetails();
   }, [source, days]);
+
+  // Pagination for combined events table
+  const [combinedPage, setCombinedPage] = useState(1);
+  const combinedPageSize = 10;
+  const [selectedRange, setSelectedRange] = useState(null);
 
   // Filtering helpers that respect selectedDate if set
   const matchesDate = (item, dateStr) => {
@@ -174,7 +252,7 @@ const MetricDetails = () => {
 
         <Card>
           <CardHeader>
-            <CardTitle>Deployment Timeline ({days} days)</CardTitle>
+            <CardTitle>Timeline for ({days} days)</CardTitle>
           </CardHeader>
           <CardContent>
             {loading ? (
@@ -183,11 +261,192 @@ const MetricDetails = () => {
               <div className="text-red-600">{error}</div>
             ) : (
               <div>
-                <MetricChart data={series} color="#10b981" onPointClick={handlePointClick} />
+                {/* ServiceNow: if change_failure_rate requested, show Pie */}
+                {source === 'servicenow' && metric === 'change_failure_rate' ? (
+                  <div style={{ width: '100%', height: 220 }}>
+                    <ResponsiveContainer width="100%" height={220}>
+                      <PieChart>
+                        {(() => {
+                          const val = Number(metricsData?.change_failure_rate?.value ?? metricsData?.change_failure_rate ?? 0);
+                          const failed = Math.max(0, Math.min(100, val));
+                          const success = Math.max(0, 100 - failed);
+                          const pieData = [{ name: 'Failed', value: failed }, { name: 'Successful', value: success }];
+                          return (
+                            <>
+                              <Pie data={pieData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={70} label />
+                              <Legend />
+                            </>
+                          );
+                        })()}
+                      </PieChart>
+                    </ResponsiveContainer>
+                    <div className="text-sm text-gray-600 mt-2">Change failure rate (ServiceNow): {metricsData?.change_failure_rate?.value ?? metricsData?.change_failure_rate ?? 'N/A'}%</div>
+                  </div>
+                ) : (
+                <>
+                  {(source === 'github' && metric === 'deployment_frequency') && (
+                    <div className="mb-2">
+                      <Button size="sm" variant={chartMode === 'bar' ? 'default' : 'ghost'} onClick={() => setChartMode('bar')}>Bar</Button>
+                      <Button size="sm" variant={chartMode === 'line' ? 'default' : 'ghost'} onClick={() => setChartMode('line')}>Line</Button>
+                    </div>
+                  )}
+                  <MetricChart
+                  data={series}
+                  color="#10b981"
+                  onPointClick={handlePointClick}
+                  onBrushChange={(range) => {
+                    try {
+                      if (!range || typeof range.startIndex === 'undefined') return setSelectedRange(null);
+                      const start = range.startIndex;
+                      const end = range.endIndex;
+                      const slice = series && series.slice(start, end + 1);
+                      setSelectedRange({ startIndex: start, endIndex: end, slice });
+                    } catch (e) {
+                      console.warn('brush change', e);
+                    }
+                  }}
+                  chartType={(source === 'github' && metric === 'lead_time') ? 'bar' : (source === 'github' && metric === 'deployment_frequency' ? chartMode : 'bar')}
+                  height={220}
+                  tooltipContent={(label, point) => {
+                    return (
+                      <div className="bg-white p-3 rounded shadow text-xs border max-w-xs">
+                        <div className="font-medium mb-1">{new Date(label).toLocaleString()}</div>
+                        <div className="mb-1">Count: {point.value || 0}</div>
+                        {point.deployments && point.deployments.length > 0 && (
+                          <div className="mb-1">
+                            <div className="font-semibold">Deployments:</div>
+                            {point.deployments.slice(0, 5).map((d, i) => (
+                              <div key={i} className="text-[11px]">{(d.deploy_time || d.run_started_at || d.created_at || '').replace('T', ' ').slice(0, 19)} • {d.environment || d.status || d.conclusion || ''}</div>
+                            ))}
+                            {point.deployments.length > 5 && <div className="text-xs">+{point.deployments.length - 5} more</div>}
+                          </div>
+                        )}
+                        {point.prs && point.prs.length > 0 && (
+                          <div>
+                            <div className="font-semibold">PRs/Changes:</div>
+                            {point.prs.slice(0, 5).map((p, i) => (
+                              <div key={i} className="text-[11px]">{p.number || p.sys_id || p.id} • {p.merged_at || p.implemented_on || p.sys_created_on || ''}</div>
+                            ))}
+                            {point.prs.length > 5 && <div className="text-xs">+{point.prs.length - 5} more</div>}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  }}
+                />
+                </>
+                )}
                 <div className="text-sm text-gray-600 mt-2">{selectedDate ? `Showing items for ${selectedDate}` : 'Click a point to filter items by date'}</div>
+                {selectedRange && (
+                  <div className="text-sm text-gray-500">Selected range: {selectedRange.slice?.[0]?.date} → {selectedRange.slice?.[selectedRange.slice.length - 1]?.date}</div>
+                )}
                 {selectedDate && (
                   <Button size="sm" variant="ghost" onClick={() => setSelectedDate(null)}>Clear selection</Button>
                 )}
+                <div className="text-sm text-gray-500 mt-2">Use brush to select a range on the chart to zoom; click a bar to filter by single date.</div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {source === 'servicenow' && (
+          <Card>
+            <CardHeader>
+              <CardTitle>ServiceNow Summary</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <div className="text-sm text-gray-600">Mean Time to Recovery</div>
+                  <div className="text-xl font-semibold">{metricsData?.mean_time_to_recovery?.value ?? metricsData?.mean_time_to_recovery ?? 'N/A'} hrs</div>
+                </div>
+                <div>
+                  <div className="text-sm text-gray-600">Average deployments/day</div>
+                  <div className="text-xl font-semibold">{metricsData?.deployment_frequency_summary?.average_per_day ?? (metricsData?.deployment_frequency_summary?.value ? (Number(metricsData.deployment_frequency_summary.value) / days).toFixed(2) : 'N/A')}</div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        <Card>
+          <CardHeader>
+            <CardTitle>{selectedDate ? `Events for ${selectedDate}` : 'Select a date on the chart to see events'}</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {!selectedDate ? (
+              <div className="text-sm text-gray-500">Click a bar on the timeline to view deployments, PRs and incidents for that date.</div>
+            ) : (
+              <div className="max-h-64 overflow-auto text-sm">
+                {/* combined rows with pagination and drill links */}
+                {(() => {
+                  const rawRows = [
+                    ...(details.deployments || []).filter((d) => matchesDate(d, selectedDate)).map((d) => ({
+                      type: 'Deployment',
+                      id: d.sys_id || d.id || d.run_id || '-',
+                      time: d.deploy_time || d.run_started_at || d.created_at || d.created || '-',
+                      summary: d.environment || d.status || d.conclusion || '-',
+                      orig: d,
+                    })),
+                    ...(details.changes || []).filter((c) => matchesDate(c, selectedDate)).map((c) => ({
+                      type: 'Change',
+                      id: c.number || c.sys_id || c.id || '-',
+                      time: c.implemented_on || c.merged_at || c.sys_created_on || c.created_at || '-',
+                      summary: c.result || c.title || '-',
+                      orig: c,
+                    })),
+                    ...(details.incidents || []).filter((i) => matchesDate(i, selectedDate)).map((i) => ({
+                      type: 'Incident',
+                      id: i.sys_id || i.id || '-',
+                      time: i.opened_at || i.created_at || '-',
+                      summary: i.severity || '-',
+                      orig: i,
+                    })),
+                  ].sort((a, b) => new Date(a.time || 0) - new Date(b.time || 0));
+
+                  const total = rawRows.length;
+                  const totalPages = Math.max(1, Math.ceil(total / combinedPageSize));
+                  const page = Math.min(Math.max(1, combinedPage), totalPages);
+                  const start = (page - 1) * combinedPageSize;
+                  const paged = rawRows.slice(start, start + combinedPageSize);
+
+                  return (
+                    <div>
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="text-xs text-gray-600">Showing {start + 1}-{Math.min(start + combinedPageSize, total)} of {total}</div>
+                        <div className="space-x-2">
+                          <Button size="sm" variant="ghost" disabled={page <= 1} onClick={() => setCombinedPage((p) => Math.max(1, p - 1))}>Prev</Button>
+                          <Button size="sm" variant="ghost" disabled={page >= totalPages} onClick={() => setCombinedPage((p) => Math.min(totalPages, p + 1))}>Next</Button>
+                        </div>
+                      </div>
+                      <table className="w-full text-left">
+                        <thead>
+                          <tr>
+                            <th className="pr-2">Type</th>
+                            <th className="pr-2">ID</th>
+                            <th className="pr-2">Time</th>
+                            <th className="pr-2">Summary</th>
+                            <th className="pr-2">Link</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {paged.map((row, idx) => {
+                            const link = getLinkFor(row.orig);
+                            return (
+                              <tr key={idx} className="border-t">
+                                <td className="pr-2 py-1 text-xs">{row.type}</td>
+                                <td className="pr-2 py-1 text-xs">{row.id}</td>
+                                <td className="pr-2 py-1 text-xs">{row.time ? new Date(row.time).toLocaleString() : '-'}</td>
+                                <td className="pr-2 py-1 text-xs">{row.summary}</td>
+                                <td className="pr-2 py-1 text-xs">{link ? <a className="underline text-blue-600" href={link} target="_blank" rel="noreferrer">Open</a> : '-'}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  );
+                })()}
               </div>
             )}
           </CardContent>

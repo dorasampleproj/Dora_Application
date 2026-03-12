@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import "@/App.css";
 import axios from "axios";
 import {
@@ -126,7 +126,9 @@ const Dashboard = () => {
     mean_time_to_recovery: [],
   });
   const navigate = useNavigate();
+  const location = useLocation();
   const primarySourceType = dataSources.length > 0 ? dataSources[0].type : null;
+  const urlSource = new URLSearchParams(location.search).get('source');
 
   const fetchGitHubMetrics = async () => {
     try {
@@ -153,17 +155,37 @@ const Dashboard = () => {
 
   const fetchMetrics = async ({ datasourceCreated = false } = {}) => {
     try {
-      // If no configured data sources exist, don't attempt to fetch metrics
+      // If no configured data sources exist and not a fresh update, use mock data
       const dsListCheck = dataSources || [];
       if (!datasourceCreated && (!dsListCheck || dsListCheck.length === 0)) {
-        toast.error('No data sources configured — please add a data source');
-        // Ensure UI shows empty state
-        setMetrics(null);
+        // No configured data sources: show all four mock metrics so the dashboard is informative
         setMetricHistory({
-          deployment_frequency: [],
-          lead_time: [],
-          change_failure_rate: [],
-          mean_time_to_recovery: [],
+          deployment_frequency: sampleHistoricalData.deployment_frequency,
+          lead_time: sampleHistoricalData.lead_time,
+          change_failure_rate: sampleHistoricalData.change_failure_rate,
+          mean_time_to_recovery: sampleHistoricalData.mean_time_to_recovery,
+        });
+        setMetrics({
+          deployment_frequency: {
+            value: defaultMetrics.deployment_frequency.value,
+            unit: defaultMetrics.deployment_frequency.unit,
+            timestamp: new Date().toISOString(),
+          },
+          lead_time: {
+            value: defaultMetrics.lead_time.value,
+            unit: defaultMetrics.lead_time.unit,
+            timestamp: new Date().toISOString(),
+          },
+          change_failure_rate: {
+            value: defaultMetrics.change_failure_rate.value,
+            unit: defaultMetrics.change_failure_rate.unit,
+            timestamp: new Date().toISOString(),
+          },
+          mean_time_to_recovery: {
+            value: defaultMetrics.mean_time_to_recovery.value,
+            unit: defaultMetrics.mean_time_to_recovery.unit,
+            timestamp: new Date().toISOString(),
+          },
         });
         return;
       }
@@ -174,13 +196,17 @@ const Dashboard = () => {
       setLoading(true);
       console.log("Fetching metrics...", dataSources);
   // pick the appropriate backend metrics endpoint based on configured data sources
-  const dsList = dataSources || [];
-  const hasServiceNow = dsList.some((s) => s?.type === 'servicenow');
-      let githubMetrics = null;
-      if (hasServiceNow) {
-        githubMetrics = await fetchServiceNowMetrics();
+      const dsList = dataSources || [];
+      const hasGithub = dsList.some((s) => s?.type === 'github');
+      const hasServiceNow = dsList.some((s) => s?.type === 'servicenow');
+      let fetchedMetrics = null;
+      // Prefer GitHub metrics when a GitHub datasource is configured, otherwise fall back to ServiceNow
+      if (hasGithub) {
+        fetchedMetrics = await fetchGitHubMetrics();
+      } else if (hasServiceNow) {
+        fetchedMetrics = await fetchServiceNowMetrics();
       } else {
-        githubMetrics = await fetchGitHubMetrics();
+        fetchedMetrics = null;
       }
 
       const toNumber = (v, fallback = 0) => {
@@ -192,15 +218,12 @@ const Dashboard = () => {
         const n = Number(v);
         return Number.isNaN(n) ? fallback : n;
       };
-      console.log("before if",datasourceCreated, dataSources, githubMetrics, !!dataSources?.length); 
-      if ((Object.keys(dataSources).length > 0 || datasourceCreated) && githubMetrics) {
-        if (Array.isArray(githubMetrics.deployment_frequency)) {
+      console.log("before if", datasourceCreated, dataSources, fetchedMetrics, !!dataSources?.length);
+      if ((Array.isArray(dataSources) && dataSources.length > 0) || datasourceCreated) {
+        if (fetchedMetrics && Array.isArray(fetchedMetrics.deployment_frequency)) {
           // Ensure series values are numeric
-          console.log(
-            "Deployment Frequency Series:",
-            githubMetrics.deployment_frequency
-          );
-          deploymentSeries = githubMetrics.deployment_frequency.map((p) => ({
+          console.log("Deployment Frequency Series:", fetchedMetrics.deployment_frequency);
+          deploymentSeries = fetchedMetrics.deployment_frequency.map((p) => ({
             date: String(p.date),
             value: toNumber(p.value, 0),
           }));
@@ -208,9 +231,9 @@ const Dashboard = () => {
             (s, p) => s + (p.value || 0),
             0
           );
-           
+          
           deploymentSummaryValue = total / Math.max(deploymentSeries.length, 1);
-          changeFailureRateSeries = githubMetrics.change_failure_rate.map((p) => ({
+          changeFailureRateSeries = (fetchedMetrics.change_failure_rate || []).map((p) => ({
             date: String(p.date),
             value: toNumber(p.value, 0),
           }));
@@ -218,31 +241,21 @@ const Dashboard = () => {
             (s, p) => s + (p.value || 0),
             0
           );
-           
+          
           changeFailureRateSummaryValue = totalchangeFailureRateSeries / Math.max(changeFailureRateSeries.length, 1);
           console.log(
             "Calculated Deployment Summary Value:",
             deploymentSummaryValue
           );
         } else if (
-          githubMetrics.deployment_frequency_summary &&
-          typeof githubMetrics.deployment_frequency_summary.value !==
-            "undefined"
+          fetchedMetrics && fetchedMetrics.deployment_frequency_summary &&
+          typeof fetchedMetrics.deployment_frequency_summary.value !== "undefined"
         ) {
-          deploymentSummaryValue = toNumber(
-            githubMetrics.deployment_frequency_summary.value,
-            defaultMetrics.deployment_frequency.value
-          );
-        } else if (
-          typeof githubMetrics.deployment_frequency === "number" ||
-          typeof githubMetrics.deployment_frequency === "string"
-        ) {
-          deploymentSummaryValue = toNumber(
-            githubMetrics.deployment_frequency,
-            defaultMetrics.deployment_frequency.value
-          );
+          deploymentSummaryValue = toNumber(fetchedMetrics.deployment_frequency_summary.value, defaultMetrics.deployment_frequency.value);
+        } else if (fetchedMetrics && (typeof fetchedMetrics.deployment_frequency === "number" || typeof fetchedMetrics.deployment_frequency === "string")) {
+          deploymentSummaryValue = toNumber(fetchedMetrics.deployment_frequency, defaultMetrics.deployment_frequency.value);
         }
-      }else{
+      } else {
         console.log("Using sample data for deployment frequency");
       deploymentSeries = sampleHistoricalData.deployment_frequency;
       deploymentSummaryValue = defaultMetrics.deployment_frequency.value;
@@ -251,7 +264,7 @@ const Dashboard = () => {
       }
 
       // push series into history state for charting
-      console.log("setMetricHistory", githubMetrics,deploymentSeries);
+      console.log("setMetricHistory", fetchedMetrics, deploymentSeries);
       setMetricHistory((prev) => ({
         ...prev,
         deployment_frequency: deploymentSeries,
@@ -268,10 +281,7 @@ const Dashboard = () => {
           timestamp: new Date().toISOString(),
         },
         lead_time: {
-          value: toNumber(
-            githubMetrics?.lead_time?.value ?? githubMetrics?.lead_time,
-            defaultMetrics.lead_time.value
-          ),
+          value: toNumber(fetchedMetrics?.lead_time?.value ?? fetchedMetrics?.lead_time, defaultMetrics.lead_time.value),
           unit: "hours",
           timestamp: new Date().toISOString(),
         },
@@ -284,11 +294,7 @@ const Dashboard = () => {
           timestamp: new Date().toISOString(),
         },
         mean_time_to_recovery: {
-          value: toNumber(
-            githubMetrics?.mean_time_to_recovery?.value ??
-              githubMetrics?.mean_time_to_recovery,
-            defaultMetrics.mean_time_to_recovery.value
-          ),
+          value: toNumber(fetchedMetrics?.mean_time_to_recovery?.value ?? fetchedMetrics?.mean_time_to_recovery, defaultMetrics.mean_time_to_recovery.value),
           unit: "hours",
           timestamp: new Date().toISOString(),
         },
@@ -417,39 +423,51 @@ const Dashboard = () => {
     try {
       const response = await axios.get(`${API}/data-sources`); // Use the full API URL
       const backendList = response.data || [];
-      // If the user has local data-sources persisted, prefer those and merge with backend extras.
-      try {
-        const cached = localStorage.getItem('dora_data_sources');
-        const parsed = cached ? JSON.parse(cached) : null;
-        if (parsed && Array.isArray(parsed) && parsed.length > 0) {
-          // Merge and dedupe: prefer user sources, then add backend extras by unique key
-          const map = new Map();
-          const isValid = (s) => {
-            if (!s || !s.type) return false;
-            if (s.type === 'github') return !!(s.config && s.config.org && s.config.repo);
-            if (s.type === 'servicenow') return !!(s.config && s.config.url && s.config.token);
-            return !!s.name;
-          };
-          const pushKey = (s) => {
-            let key = `${s.type}::${s.name || s.id || ''}`;
-            if (s.type === 'servicenow' && s.config && s.config.url) key = `servicenow::${s.config.url}`;
-            if (s.type === 'github' && s.config && s.config.org && s.config.repo) key = `github::${s.config.org}/${s.config.repo}`;
-            return key;
-          };
-          // First add parsed (user) entries (only valid ones)
-          for (const s of parsed.filter(isValid)) map.set(pushKey(s), s);
-          // Add backend entries only if they don't duplicate
-          for (const b of backendList) {
-            const k = pushKey(b);
-            if (!map.has(k)) map.set(k, b);
-          }
-          const merged = Array.from(map.values());
-          setDataSources(merged);
-          try { localStorage.setItem('dora_data_sources', JSON.stringify(merged)); } catch (e) { console.warn('localStorage save failed', e); }
-          return merged;
+      // If caller requested to skip local cache (initial load), still set the authoritative list
+      if (opts && opts.skipLocalCache) {
+        try {
+          setDataSources(backendList);
+        } catch (e) {
+          console.warn('failed to set dataSources from backend', e);
         }
-      } catch (e) {
-        console.warn('Failed to read/merge cached data sources', e);
+        return backendList;
+      }
+      // If the user has local data-sources persisted, prefer those and merge with backend extras.
+      // This can be skipped by passing opts.skipLocalCache = true.
+      if (!opts.skipLocalCache) {
+        try {
+          const cached = localStorage.getItem('dora_data_sources');
+          const parsed = cached ? JSON.parse(cached) : null;
+          if (parsed && Array.isArray(parsed) && parsed.length > 0) {
+            // Merge and dedupe: prefer user sources, then add backend extras by unique key
+            const map = new Map();
+            const isValid = (s) => {
+              if (!s || !s.type) return false;
+              if (s.type === 'github') return !!(s.config && s.config.org && s.config.repo);
+              if (s.type === 'servicenow') return !!(s.config && s.config.url && s.config.token);
+              return !!s.name;
+            };
+            const pushKey = (s) => {
+              let key = `${s.type}::${s.name || s.id || ''}`;
+              if (s.type === 'servicenow' && s.config && s.config.url) key = `servicenow::${s.config.url}`;
+              if (s.type === 'github' && s.config && s.config.org && s.config.repo) key = `github::${s.config.org}/${s.config.repo}`;
+              return key;
+            };
+            // First add parsed (user) entries (only valid ones)
+            for (const s of parsed.filter(isValid)) map.set(pushKey(s), s);
+            // Add backend entries only if they don't duplicate
+            for (const b of backendList) {
+              const k = pushKey(b);
+              if (!map.has(k)) map.set(k, b);
+            }
+            const merged = Array.from(map.values());
+            setDataSources(merged);
+            try { localStorage.setItem('dora_data_sources', JSON.stringify(merged)); } catch (e) { console.warn('localStorage save failed', e); }
+            return merged;
+          }
+        } catch (e) {
+          console.warn('Failed to read/merge cached data sources', e);
+        }
       }
 
       // No local cached sources — do not auto-populate the dashboard from backend defaults
@@ -531,8 +549,8 @@ const Dashboard = () => {
           toast.success("GitHub data source configured successfully");
           console.log("Data Source Created:", response.data);
           setDataSourceCreated(true);
-            // Refresh the full list of data sources from the backend so the UI is consistent
-            await fetchDataSources({ forceWrite: true });
+          // Refresh authoritative list from backend
+          await fetchDataSources({ forceWrite: true });
           setIsConfiguring(false);
           setNewDataSource({ name: "", type: "", config: {} });
           await fetchMetrics({ datasourceCreated: true });
@@ -566,27 +584,18 @@ const Dashboard = () => {
           }
         };
 
-        // Locally add the data source and fetch metrics from the mock endpoint
-        setDataSources(prev => {
-          // Prevent duplicates by using the same key logic as load
-          const map = new Map();
-          const keyFor = (s) => {
-            let key = `${s.type}::${s.name || s.id || ''}`;
-            if (s.type === 'servicenow' && s.config && s.config.url) key = `servicenow::${s.config.url}`;
-            if (s.type === 'github' && s.config && s.config.org && s.config.repo) key = `github::${s.config.org}/${s.config.repo}`;
-            return key;
-          };
-          for (const s of prev || []) map.set(keyFor(s), s);
-          map.set(keyFor(payload), payload);
-          const merged = Array.from(map.values());
-          try { localStorage.setItem('dora_data_sources', JSON.stringify(merged)); } catch (e) { console.warn('localStorage save failed', e); }
-          return merged;
-        });
-        toast.success('ServiceNow data source configured (local)');
-        setIsConfiguring(false);
-        setNewDataSource({ name: '', type: '', config: {} });
-        setDataSourceCreated(true);
-        await fetchMetrics({ datasourceCreated: true });
+        // Persist ServiceNow datasource to backend so it's available to other sessions
+        const resp = await axios.post(`${API}/data-sources`, payload, { headers: { 'Content-Type': 'application/json' } });
+        if (resp.status === 201 || resp.status === 200) {
+          toast.success('ServiceNow data source configured');
+          await fetchDataSources({ forceWrite: true });
+          setIsConfiguring(false);
+          setNewDataSource({ name: '', type: '', config: {} });
+          setDataSourceCreated(true);
+          await fetchMetrics({ datasourceCreated: true });
+        } else {
+          throw new Error('Failed to persist ServiceNow datasource');
+        }
       }
     } catch (error) {
       console.error("Failed to create data source:", error);
@@ -843,49 +852,15 @@ const Dashboard = () => {
     const initializeData = async () => {
       try {
         setLoading(true);
-        // Load cached data-sources from localStorage so the UI keeps showing configured sources
-        // Deduplicate entries (by type + identifying config/name) to avoid repeated items
-        let cachedParsed = null;
-        try {
-          const cached = localStorage.getItem('dora_data_sources');
-          if (cached) {
-            const parsed = JSON.parse(cached);
-            if (Array.isArray(parsed) && parsed.length > 0) {
-              // Only consider entries that look like fully-configured sources.
-              const isValid = (s) => {
-                if (!s || !s.type) return false;
-                if (s.type === 'github') return !!(s.config && s.config.org && s.config.repo);
-                if (s.type === 'servicenow') return !!(s.config && s.config.url && s.config.token);
-                // For other types, require a name
-                return !!s.name;
-              };
+        // Start with empty datasources list - don't auto-load from localStorage
+        setDataSources([]);
+        
+        // Load default mock metrics on page load
+        await fetchMetrics();
 
-              // Normalize and dedupe by key: prefer a stable identifier per type
-              const map = new Map();
-              for (const s of parsed.filter(isValid)) {
-                let key = `${s.type}::${s.name || s.id || ''}`;
-                if (s.type === 'servicenow' && s.config && s.config.url) key = `servicenow::${s.config.url}`;
-                if (s.type === 'github' && s.config && s.config.org && s.config.repo) key = `github::${s.config.org}/${s.config.repo}`;
-                if (!map.has(key)) map.set(key, s);
-              }
-              const unique = Array.from(map.values());
-              cachedParsed = unique;
-              if (cachedParsed) setDataSources(cachedParsed);
-              // Ensure localStorage is canonicalized
-              try { localStorage.setItem('dora_data_sources', JSON.stringify(cachedParsed)); } catch (e) { /* ignore */ }
-            }
-          }
-        } catch (e) {
-          console.warn('Failed to read cached data sources', e);
-        }
-
-        // If we already have configured data-sources (cached), fetch metrics now.
-        if (cachedParsed && cachedParsed.length > 0) {
-          await fetchMetrics();
-        }
-
-        // Refresh authoritative data-sources list in background (this will update cache)
-        fetchDataSources().catch((e) => console.warn('fetchDataSources failed', e));
+        // Refresh authoritative data-sources list in background (without forcing write to state)
+        // Skip local cache on initial load so the UI remains empty until user connects a source
+        fetchDataSources({ skipLocalCache: true }).catch((e) => console.warn('fetchDataSources failed', e));
       } catch (error) {
         console.error("Failed to initialize data:", error);
         toast.error("Failed to load initial data");
@@ -898,7 +873,15 @@ const Dashboard = () => {
 
     // Set up auto-refresh
     const interval = setInterval(fetchMetrics, 300000);
-    return () => clearInterval(interval);
+    // Clear session indicators on unload and clear interval
+    const onUnload = () => {
+      try { sessionStorage.removeItem('dora_data_sources_session'); } catch (e) { /* ignore */ }
+    };
+    window.addEventListener('beforeunload', onUnload);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('beforeunload', onUnload);
+    };
   }, []);
 
   // useEffect(() => {
@@ -950,10 +933,10 @@ const Dashboard = () => {
 
   const getMetricColor = (metricType, value) => {
     // Coerce possible nested objects or strings to number
-    const n =
-      value && typeof value === "object" && "value" in value
-        ? Number(value.value)
-        : Number(value);
+    let n;
+    if (value === null || typeof value === 'undefined') n = NaN;
+    else if (typeof value === "object" && "value" in value) n = Number(value.value);
+    else n = Number(value);
     if (Number.isNaN(n)) return "text-gray-600";
     switch (metricType) {
       case "deployment_frequency":
@@ -987,10 +970,10 @@ const Dashboard = () => {
 
   const formatMetricValue = (metricType, value) => {
     // Coerce nested objects or strings to numeric value where possible
-    const n =
-      value && typeof value === "object" && "value" in value
-        ? Number(value.value)
-        : Number(value);
+    let n;
+    if (value === null || typeof value === 'undefined') n = NaN;
+    else if (typeof value === "object" && "value" in value) n = Number(value.value);
+    else n = Number(value);
     if (Number.isNaN(n)) {
       // If not a number, fall back to a safe representation
       return "-";
@@ -1194,211 +1177,91 @@ const Dashboard = () => {
         {/* DORA Metrics Grid */}
         {metrics ? (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-            {/* Deployment Frequency */}
-            <Card className="bg-white/80 backdrop-blur-sm border-0 shadow-lg hover:shadow-xl transition-all duration-300">
-              <CardHeader className="pb-3">
-                <CardTitle className="text-sm font-medium text-gray-700">
-                  Deployment Frequency
-                </CardTitle>
-                <CardDescription className="text-xs">
-                  How often deployments occur
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <MetricChart
-                  data={metricHistory.deployment_frequency}
-                  color="#10b981"
-                />
-                <div className="space-y-2">
-                  <div
-                    className={`text-2xl font-bold ${getMetricColor(
-                      "deployment_frequency",
-                      metrics.deployment_frequency.value
-                    )}`}
-                  >
-                    {formatMetricValue(
-                      "deployment_frequency",
-                      metrics.deployment_frequency.value
-                    )}
+            {/* Deployment Frequency (only if available) */}
+            {metrics.deployment_frequency && metrics.deployment_frequency.value !== null && (
+              <Card className="bg-white/80 backdrop-blur-sm border-0 shadow-lg hover:shadow-xl transition-all duration-300">
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm font-medium text-gray-700">Deployment Frequency</CardTitle>
+                  <CardDescription className="text-xs">How often deployments occur</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <MetricChart data={metricHistory.deployment_frequency} color="#10b981" />
+                  <div className="space-y-2">
+                    <div className={`text-2xl font-bold ${getMetricColor("deployment_frequency", metrics.deployment_frequency.value)}`}>
+                      {formatMetricValue("deployment_frequency", metrics.deployment_frequency.value)}
+                    </div>
+                    <div className="text-xs text-gray-500">{metrics.deployment_frequency.unit}</div>
+                    <div className="text-xs text-gray-400">Last updated: {metrics.deployment_frequency.timestamp ? new Date(metrics.deployment_frequency.timestamp).toLocaleTimeString() : '-'}</div>
+                    <div className="mt-3">
+                      <Button size="sm" variant="outline" disabled={!(primarySourceType || urlSource)} onClick={() => (primarySourceType || urlSource) && navigate(`/details?source=${primarySourceType || urlSource}&metric=deployment_frequency`)}>More Details</Button>
+                    </div>
                   </div>
-                  <div className="text-xs text-gray-500">
-                    {metrics.deployment_frequency.unit}
-                  </div>
-                  <div className="text-xs text-gray-400">
-                    Last updated:{" "}
-                    {new Date(
-                      metrics.deployment_frequency.timestamp
-                    ).toLocaleTimeString()}
-                  </div>
-                  <div className="mt-3">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={!primarySourceType}
-                      onClick={() =>
-                        primarySourceType && navigate(`/details?source=${primarySourceType}&metric=deployment_frequency`)
-                      }
-                    >
-                      More Details
-                    </Button>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
+                </CardContent>
+              </Card>
+            )}
 
-            {/* Lead Time */}
-            <Card className="bg-white/80 backdrop-blur-sm border-0 shadow-lg hover:shadow-xl transition-all duration-300">
-              <CardHeader className="pb-3">
-                <CardTitle className="text-sm font-medium text-gray-700">
-                  Lead Time for Changes
-                </CardTitle>
-                <CardDescription className="text-xs">
-                  Time from code committed to production
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <MetricChart
-                  data={metricHistory.lead_time}
-                  color="#6366f1"
-                />
-                <div className="space-y-2">
-                  <div
-                    className={`text-2xl font-bold ${getMetricColor(
-                      "lead_time",
-                      metrics.lead_time.value
-                    )}`}
-                  >
-                    {formatMetricValue(
-                      "lead_time",
-                      metrics.lead_time.value
-                    )}
+            {/* Lead Time (only if available) */}
+            {metrics.lead_time && metrics.lead_time.value !== null && (
+              <Card className="bg-white/80 backdrop-blur-sm border-0 shadow-lg hover:shadow-xl transition-all duration-300">
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm font-medium text-gray-700">Lead Time for Changes</CardTitle>
+                  <CardDescription className="text-xs">Time from code committed to production</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <MetricChart data={metricHistory.lead_time} color="#6366f1" />
+                  <div className="space-y-2">
+                    <div className={`text-2xl font-bold ${getMetricColor("lead_time", metrics.lead_time.value)}`}>{formatMetricValue("lead_time", metrics.lead_time.value)}</div>
+                    <div className="text-xs text-gray-500">{metrics.lead_time.unit}</div>
+                    <div className="text-xs text-gray-400">Last updated: {metrics.lead_time.timestamp ? new Date(metrics.lead_time.timestamp).toLocaleTimeString() : '-'}</div>
+                    <div className="mt-3">
+                      <Button size="sm" variant="outline" disabled={!(primarySourceType || urlSource)} onClick={() => (primarySourceType || urlSource) && navigate(`/details?source=${primarySourceType || urlSource}&metric=lead_time`)}>More Details</Button>
+                    </div>
                   </div>
-                  <div className="text-xs text-gray-500">
-                    {metrics.lead_time.unit}
-                  </div>
-                  <div className="text-xs text-gray-400">
-                    Last updated:{" "}
-                    {new Date(metrics.lead_time.timestamp).toLocaleTimeString()}
-                  </div>
-                  <div className="mt-3">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={!primarySourceType}
-                      onClick={() =>
-                        primarySourceType && navigate(`/details?source=${primarySourceType}&metric=lead_time`)
-                      }
-                    >
-                      More Details
-                    </Button>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
+                </CardContent>
+              </Card>
+            )}
 
-            {/* Change Failure Rate */}
-            <Card className="bg-white/80 backdrop-blur-sm border-0 shadow-lg hover:shadow-xl transition-all duration-300">
-              <CardHeader className="pb-3">
-                <CardTitle className="text-sm font-medium text-gray-700">
-                  Change Failure Rate
-                </CardTitle>
-                <CardDescription className="text-xs">
-                  Percentage of deployments causing failures
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <MetricChart
-                  data={metricHistory.change_failure_rate}
-                  color="#ef4444"
-                />
-                <div className="space-y-2">
-                  <div
-                    className={`text-2xl font-bold ${getMetricColor(
-                      "Change_Failure_Rate",
-                      metrics.change_failure_rate.value
-                    )}`}
-                  >
-                    {formatMetricValue(
-                      "Change_Failure_Rate",
-                      metrics.change_failure_rate.value
-                    )}
+            {/* Change Failure Rate (only if available) */}
+            {metrics.change_failure_rate && metrics.change_failure_rate.value !== null && (
+              <Card className="bg-white/80 backdrop-blur-sm border-0 shadow-lg hover:shadow-xl transition-all duration-300">
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm font-medium text-gray-700">Change Failure Rate</CardTitle>
+                  <CardDescription className="text-xs">Percentage of deployments causing failures</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <MetricChart data={metricHistory.change_failure_rate} color="#ef4444" />
+                  <div className="space-y-2">
+                    <div className={`text-2xl font-bold ${getMetricColor("Change_Failure_Rate", metrics.change_failure_rate.value)}`}>{formatMetricValue("Change_Failure_Rate", metrics.change_failure_rate.value)}</div>
+                    <div className="text-xs text-gray-500">{metrics.change_failure_rate.unit}</div>
+                    <div className="text-xs text-gray-400">Last updated: {metrics.change_failure_rate.timestamp ? new Date(metrics.change_failure_rate.timestamp).toLocaleTimeString() : '-'}</div>
+                    <div className="mt-3">
+                      <Button size="sm" variant="outline" disabled={!(primarySourceType || urlSource)} onClick={() => (primarySourceType || urlSource) && navigate(`/details?source=${primarySourceType || urlSource}&metric=change_failure_rate`)}>More Details</Button>
+                    </div>
                   </div>
-                  <div className="text-xs text-gray-500">
-                    {metrics.change_failure_rate.unit}
-                  </div>
-                  <div className="text-xs text-gray-400">
-                    Last updated:{" "}
-                    {new Date(
-                      metrics.change_failure_rate.timestamp
-                    ).toLocaleTimeString()}
-                  </div>
-                  <div className="mt-3">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={!primarySourceType}
-                      onClick={() =>
-                        primarySourceType && navigate(`/details?source=${primarySourceType}&metric=change_failure_rate`)
-                      }
-                    >
-                      More Details
-                    </Button>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
+                </CardContent>
+              </Card>
+            )}
 
-            {/* Mean Time to Recovery */}
-            <Card className="bg-white/80 backdrop-blur-sm border-0 shadow-lg hover:shadow-xl transition-all duration-300">
-              <CardHeader className="pb-3">
-                <CardTitle className="text-sm font-medium text-gray-700">
-                  Mean Time to Recovery
-                </CardTitle>
-                <CardDescription className="text-xs">
-                  Average time to recover from failures
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <MetricChart
-                  data={metricHistory.mean_time_to_recovery}
-                  color="#f59e0b"
-                />
-                <div className="space-y-2">
-                  <div
-                    className={`text-2xl font-bold ${getMetricColor(
-                      "mean_time_to_recovery",
-                      metrics.mean_time_to_recovery.value
-                    )}`}
-                  >
-                    {formatMetricValue(
-                      "mean_time_to_recovery",
-                      metrics.mean_time_to_recovery.value
-                    )}
+            {/* Mean Time to Recovery (only if available) */}
+            {metrics.mean_time_to_recovery && metrics.mean_time_to_recovery.value !== null && (
+              <Card className="bg-white/80 backdrop-blur-sm border-0 shadow-lg hover:shadow-xl transition-all duration-300">
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm font-medium text-gray-700">Mean Time to Recovery</CardTitle>
+                  <CardDescription className="text-xs">Average time to recover from failures</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <MetricChart data={metricHistory.mean_time_to_recovery} color="#f59e0b" />
+                  <div className="space-y-2">
+                    <div className={`text-2xl font-bold ${getMetricColor("mean_time_to_recovery", metrics.mean_time_to_recovery.value)}`}>{formatMetricValue("mean_time_to_recovery", metrics.mean_time_to_recovery.value)}</div>
+                    <div className="text-xs text-gray-500">{metrics.mean_time_to_recovery.unit}</div>
+                    <div className="text-xs text-gray-400">Last updated: {metrics.mean_time_to_recovery.timestamp ? new Date(metrics.mean_time_to_recovery.timestamp).toLocaleTimeString() : '-'}</div>
+                    <div className="mt-3">
+                      <Button size="sm" variant="outline" disabled={!(primarySourceType || urlSource)} onClick={() => (primarySourceType || urlSource) && navigate(`/details?source=${primarySourceType || urlSource}&metric=mean_time_to_recovery`)}>More Details</Button>
+                    </div>
                   </div>
-                  <div className="text-xs text-gray-500">
-                    {metrics.mean_time_to_recovery.unit}
-                  </div>
-                  <div className="text-xs text-gray-400">
-                    Last updated:{" "}
-                    {new Date(
-                      metrics.mean_time_to_recovery.timestamp
-                    ).toLocaleTimeString()}
-                  </div>
-                  <div className="mt-3">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={!primarySourceType}
-                      onClick={() =>
-                        primarySourceType && navigate(`/details?source=${primarySourceType}&metric=mean_time_to_recovery`)
-                      }
-                    >
-                      More Details
-                    </Button>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
+                </CardContent>
+              </Card>
+            )}
           </div>
         ) : (
           <Card className="bg-white/80 backdrop-blur-sm border-0 shadow-lg">

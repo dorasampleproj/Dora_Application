@@ -16,7 +16,7 @@ function formatDateISODay(date) {
 }
 
 // Generate synthetic dataset for last `days` days
-function generateMockData(days = 30) {
+function generateMockData(days = 90) {
   const deployments = [];
   const changes = [];
   const incidents = [];
@@ -86,7 +86,7 @@ function generateMockData(days = 30) {
 }
 
 // Build deployment series for the last `days` days
-function buildDeploymentSeriesFromDeployments(deployments, days = 30) {
+function buildDeploymentSeriesFromDeployments(deployments, days = 90) {
   const today = new Date();
   const counts = {};
   for (let i = 0; i < days; i++) {
@@ -143,7 +143,7 @@ function calculateMTTRHours(incidents) {
 
 router.get('/metrics', async (req, res) => {
   try {
-    const days = Number(req.query.days || 30);
+    const days = Number(req.query.days || 90);
     // Synthesize mock data
     const { deployments, changes, incidents } = generateMockData(days);
 
@@ -163,7 +163,7 @@ router.get('/metrics', async (req, res) => {
 
     res.json({
       deployment_frequency: deployment_series,
-      deployment_frequency_summary: { value: totalDeploys, count_last_30_days: totalDeploys, unit: 'total deployments' },
+      deployment_frequency_summary: { value: totalDeploys, total_deploys: totalDeploys, average_per_day: Number((totalDeploys / Math.max(days,1)).toFixed(2)), unit: 'deploys' },
       lead_time: { value: Number(leadTime.toFixed(2)), unit: 'hours' },
       change_failure_rate: { value: Number(changeFailureRate.toFixed(2)), unit: 'percent' },
       mean_time_to_recovery: { value: Number(mttr.toFixed(2)), unit: 'hours' },
@@ -177,7 +177,7 @@ router.get('/metrics', async (req, res) => {
 // Details endpoint for More Details view - return the synthesized arrays
 router.get('/details', async (req, res) => {
   try {
-    const days = Number(req.query.days || 30);
+    const days = Number(req.query.days || 90);
     const { deployments, changes, incidents } = generateMockData(days);
     res.json({ deployments, changes, incidents });
   } catch (err) {
