@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { MetricChart } from './MetricChart';
-import { PieChart, Pie, Cell, Legend, ResponsiveContainer } from 'recharts';
+import { PieChart, Pie, Cell, Legend, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts';
 import { Card, CardHeader, CardTitle, CardContent, Button, Badge, Input } from './components/ui';
 import { toast } from 'sonner';
 
@@ -64,6 +64,9 @@ const MetricDetails = () => {
   const [incidentsSort, setIncidentsSort] = useState({ key: 'opened', dir: 'desc' });
   const [metricsData, setMetricsData] = useState({});
   const [chartMode, setChartMode] = useState(() => (metric === 'deployment_frequency' ? 'bar' : 'bar'));
+  const [cfrDetailsShown, setCfrDetailsShown] = useState(false);
+  const [cfrSelectedSegment, setCfrSelectedSegment] = useState(null);
+  const [expandedLeadTimeRows, setExpandedLeadTimeRows] = useState({});
 
   const copyToClipboard = async (text) => {
     try {
@@ -140,8 +143,9 @@ const MetricDetails = () => {
         const deployments = data.deployments || data.workflow_runs || [];
         const changes = data.changes || data.pulls || [];
         const incidents = data.incidents || data.issues || [];
+        const leadTimeData = data.lead_time_data || [];
 
-        setDetails({ deployments, changes, incidents });
+        setDetails({ deployments, changes, incidents, lead_time_data: leadTimeData });
 
         // Build an enriched series: for each day include deployments and PRs so tooltips can show rich info
         const seriesByDate = {};
@@ -249,7 +253,7 @@ const MetricDetails = () => {
             <Button onClick={() => { window.location.reload(); }}>Refresh</Button>
           </div>
         </div>
-
+        {(metric !== 'lead_time' && metric !== 'mean_time_to_recovery') && (
         <Card>
           <CardHeader>
             <CardTitle>Timeline for ({days} days)</CardTitle>
@@ -267,20 +271,38 @@ const MetricDetails = () => {
                     <ResponsiveContainer width="100%" height={220}>
                       <PieChart>
                         {(() => {
-                          const val = Number(metricsData?.change_failure_rate?.value ?? metricsData?.change_failure_rate ?? 0);
-                          const failed = Math.max(0, Math.min(100, val));
-                          const success = Math.max(0, 100 - failed);
-                          const pieData = [{ name: 'Failed', value: failed }, { name: 'Successful', value: success }];
+                          // Use breakdownData if available from backend
+                          const breakdown = metricsData?.change_failure_rate_breakdown?.breakdownData;
+                          const pieData = breakdown && breakdown.length > 0 ? breakdown.map(d => ({ name: d.name, value: d.value, fill: d.fill })) : [
+                            { name: 'Successful', value: 100 - (Number(metricsData?.change_failure_rate?.value ?? 0)), fill: '#10b981' },
+                            { name: 'Failed', value: Number(metricsData?.change_failure_rate?.value ?? 0), fill: '#ef4444' }
+                          ];
                           return (
                             <>
-                              <Pie data={pieData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={70} label />
+                              <Pie 
+                                data={pieData} 
+                                dataKey="value" 
+                                nameKey="name" 
+                                cx="50%" 
+                                cy="50%" 
+                                outerRadius={70} 
+                                label
+                                onClick={(entry) => {
+                                  setCfrSelectedSegment(entry.name);
+                                  setCfrDetailsShown(true);
+                                }}
+                              >
+                                {pieData.map((entry, index) => (
+                                  <Cell key={`cell-${index}`} fill={entry.fill} />
+                                ))}
+                              </Pie>
                               <Legend />
                             </>
                           );
                         })()}
                       </PieChart>
                     </ResponsiveContainer>
-                    <div className="text-sm text-gray-600 mt-2">Change failure rate (ServiceNow): {metricsData?.change_failure_rate?.value ?? metricsData?.change_failure_rate ?? 'N/A'}%</div>
+                    <div className="text-sm text-gray-600 mt-2">Change failure rate (ServiceNow): {metricsData?.change_failure_rate?.value ?? metricsData?.change_failure_rate ?? 'N/A'}% <span className="text-blue-600 cursor-pointer" onClick={() => setCfrDetailsShown(!cfrDetailsShown)}>(click pie chart for details)</span></div>
                   </div>
                 ) : (
                 <>
@@ -348,8 +370,113 @@ const MetricDetails = () => {
             )}
           </CardContent>
         </Card>
+        )}
 
-        {source === 'servicenow' && (
+        {source === 'servicenow' && metric === 'change_failure_rate' && cfrDetailsShown && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Change Failure Rate - Scenario Details</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-4">
+                {(() => {
+                  const cfrRate = Number(metricsData?.change_failure_rate?.value ?? 0);
+                  const totalChanges = 100;
+                  const failedChanges = Math.round((cfrRate / 100) * totalChanges);
+                  const successfulChanges = totalChanges - failedChanges;
+
+                  // Mock data for failed and successful scenarios
+                  const failedScenarios = [
+                    { id: 'CHG0001', service: 'Payment Service', status: 'Failed', reason: 'Database connection timeout', deploymentTime: '2024-03-20T10:30:00Z', rollbackTime: '2024-03-20T10:45:00Z', operationalImpact: 'High' },
+                    { id: 'CHG0002', service: 'Auth Service', status: 'Failed', reason: 'Invalid deployment configuration', deploymentTime: '2024-03-20T11:00:00Z', rollbackTime: '2024-03-20T11:15:00Z', operationalImpact: 'Critical' },
+                    { id: 'CHG0003', service: 'API Gateway', status: 'Failed', reason: 'Missing environment variable', deploymentTime: '2024-03-20T14:20:00Z', rollbackTime: '2024-03-20T14:35:00Z', operationalImpact: 'Medium' },
+                  ];
+
+                  const successfulScenarios = [
+                    { id: 'CHG0004', service: 'Notification Service', status: 'Successful', duration: '8 minutes', deploymentTime: '2024-03-20T09:00:00Z', qualityScore: '9.5/10' },
+                    { id: 'CHG0005', service: 'User Service', status: 'Successful', duration: '5 minutes', deploymentTime: '2024-03-20T12:30:00Z', qualityScore: '9.8/10' },
+                    { id: 'CHG0006', service: 'Report Service', status: 'Successful', duration: '12 minutes', deploymentTime: '2024-03-20T15:45:00Z', qualityScore: '9.2/10' },
+                  ];
+
+                  if (cfrSelectedSegment === 'Failed') {
+                    return (
+                      <div>
+                        <h3 className="text-lg font-semibold mb-3">Failed Changes ({failedChanges} out of {totalChanges})</h3>
+                        <div className="max-h-96 overflow-auto text-sm">
+                          <table className="w-full text-left border-collapse">
+                            <thead className="sticky top-0 bg-red-50">
+                              <tr>
+                                <th className="border p-2 font-semibold">Change ID</th>
+                                <th className="border p-2 font-semibold">Service</th>
+                                <th className="border p-2 font-semibold">Status</th>
+                                <th className="border p-2 font-semibold">Failure Reason</th>
+                                <th className="border p-2 font-semibold">Deployment Time</th>
+                                <th className="border p-2 font-semibold">Rollback Time</th>
+                                <th className="border p-2 font-semibold">Operational Impact</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {failedScenarios.map((scenario, idx) => (
+                                <tr key={idx} className="hover:bg-gray-50 border-b">
+                                  <td className="border p-2 font-medium text-blue-600">{scenario.id}</td>
+                                  <td className="border p-2">{scenario.service}</td>
+                                  <td className="border p-2"><Badge variant="destructive">{scenario.status}</Badge></td>
+                                  <td className="border p-2 text-xs">{scenario.reason}</td>
+                                  <td className="border p-2 text-xs">{new Date(scenario.deploymentTime).toLocaleString()}</td>
+                                  <td className="border p-2 text-xs">{new Date(scenario.rollbackTime).toLocaleString()}</td>
+                                  <td className="border p-2">
+                                    <Badge variant={scenario.operationalImpact === 'Critical' ? 'destructive' : scenario.operationalImpact === 'High' ? 'secondary' : 'outline'}>
+                                      {scenario.operationalImpact}
+                                    </Badge>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    );
+                  } else if (cfrSelectedSegment === 'Successful') {
+                    return (
+                      <div>
+                        <h3 className="text-lg font-semibold mb-3">Successful Changes ({successfulChanges} out of {totalChanges})</h3>
+                        <div className="max-h-96 overflow-auto text-sm">
+                          <table className="w-full text-left border-collapse">
+                            <thead className="sticky top-0 bg-green-50">
+                              <tr>
+                                <th className="border p-2 font-semibold">Change ID</th>
+                                <th className="border p-2 font-semibold">Service</th>
+                                <th className="border p-2 font-semibold">Status</th>
+                                <th className="border p-2 font-semibold">Deployment Duration</th>
+                                <th className="border p-2 font-semibold">Deployment Time</th>
+                                <th className="border p-2 font-semibold">Quality Score</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {successfulScenarios.map((scenario, idx) => (
+                                <tr key={idx} className="hover:bg-gray-50 border-b">
+                                  <td className="border p-2 font-medium text-blue-600">{scenario.id}</td>
+                                  <td className="border p-2">{scenario.service}</td>
+                                  <td className="border p-2"><Badge variant="success">{scenario.status}</Badge></td>
+                                  <td className="border p-2">{scenario.duration}</td>
+                                  <td className="border p-2 text-xs">{new Date(scenario.deploymentTime).toLocaleString()}</td>
+                                  <td className="border p-2 font-medium text-green-600">{scenario.qualityScore}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    );
+                  }
+                  return <div className="text-gray-500">Click on a pie chart segment to view details</div>;
+                })()}
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {source === 'servicenow' && metric !== 'change_failure_rate' && (
           <Card>
             <CardHeader>
               <CardTitle>ServiceNow Summary</CardTitle>
@@ -371,14 +498,194 @@ const MetricDetails = () => {
 
         <Card>
           <CardHeader>
-            <CardTitle>{selectedDate ? `Events for ${selectedDate}` : 'Select a date on the chart to see events'}</CardTitle>
+            <CardTitle>{source === 'github' && metric === 'lead_time' ? 'Lead Time for Changes (with Average & Median)' : selectedDate ? `Events for ${selectedDate}` : 'Select a date on the chart to see events'}</CardTitle>
           </CardHeader>
           <CardContent>
-            {!selectedDate ? (
+            {source === 'github' && metric === 'lead_time' ? (
+              // GitHub Lead Time Details with Stacked Bar Chart
+              <div className="space-y-4">
+                <div style={{ width: '100%', height: 280 }}>
+                  {details.lead_time_data && details.lead_time_data.length > 0 ? (
+                    <ResponsiveContainer width="100%" height={280}>
+                      <BarChart data={details.lead_time_data.map((row) => ({
+                        ...row,
+                        date: row.date,
+                        'Avg Lead Time': row.average_lead_time || 0,
+                        'PR Count': row.data_points ? row.data_points.length : 0,
+                      }))}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
+                        <XAxis dataKey="date" tickFormatter={(d) => new Date(d).toLocaleDateString()} />
+                        <YAxis />
+                        <Tooltip 
+                          content={({ active, payload }) => {
+                            if (!active || !payload || !payload[0]) return null;
+                            const data = payload[0].payload;
+                            return (
+                              <div className="bg-white p-3 rounded shadow border text-xs">
+                                <div className="font-semibold">{data.date}</div>
+                                <div>Average Lead Time: {data.average_lead_time?.toFixed(2) || 0} hrs</div>
+                                <div>Median Lead Time: {data.median_lead_time?.toFixed(2) || 0} hrs</div>
+                                <div>Number of PRs: {data.data_points?.length || 0}</div>
+                                <div className="mt-1 font-semibold">Lead Times:</div>
+                                {data.data_points?.slice(0, 5).map((time, i) => (
+                                  <div key={i}>{time.toFixed(2)} hrs</div>
+                                ))}
+                                {data.data_points?.length > 5 && <div>+{data.data_points.length - 5} more</div>}
+                              </div>
+                            );
+                          }}
+                        />
+                        <Legend />
+                        <Bar dataKey="Avg Lead Time" fill="#6366f1" name="Average Lead Time (hrs)" />
+                        <Bar dataKey="PR Count" fill="#10b981" name="PR Count" />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <div className="flex items-center justify-center h-64 bg-gray-100 rounded text-gray-500">
+                      No lead time data available
+                    </div>
+                  )}
+                </div>
+                <div className="max-h-96 overflow-auto text-sm">
+                  {details.lead_time_data && details.lead_time_data.length > 0 ? (
+                    <table className="w-full text-left border-collapse">
+                      <thead className="sticky top-0 bg-gray-100">
+                        <tr>
+                          <th className="border p-2 font-semibold">Date</th>
+                          <th className="border p-2 font-semibold">Average Lead Time (hrs)</th>
+                          <th className="border p-2 font-semibold">Median Lead Time (hrs)</th>
+                          <th className="border p-2 font-semibold">Min Lead Time (hrs)</th>
+                          <th className="border p-2 font-semibold">Max Lead Time (hrs)</th>
+                          <th className="border p-2 font-semibold">PR Count</th>
+                          <th className="border p-2 font-semibold">Details</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {details.lead_time_data.map((row, idx) => {
+                          const isExpanded = !!expandedLeadTimeRows[idx];
+                          const minLeadTime = row.data_points && row.data_points.length > 0 ? Math.min(...row.data_points) : 0;
+                          const maxLeadTime = row.data_points && row.data_points.length > 0 ? Math.max(...row.data_points) : 0;
+                          return (
+                            <React.Fragment key={idx}>
+                              <tr className="hover:bg-gray-50">
+                                <td className="border p-2">{row.date}</td>
+                                <td className="border p-2 font-medium text-blue-600">{row.average_lead_time?.toFixed(2) || 0}</td>
+                                <td className="border p-2 font-medium text-green-600">{row.median_lead_time?.toFixed(2) || 0}</td>
+                                <td className="border p-2 text-gray-600">{minLeadTime?.toFixed(2) || 0}</td>
+                                <td className="border p-2 text-gray-600">{maxLeadTime?.toFixed(2) || 0}</td>
+                                <td className="border p-2 text-gray-600">{row.data_points?.length || 0} PRs</td>
+                                <td className="border p-2">
+                                  <Button 
+                                    size="sm" 
+                                    variant="ghost" 
+                                    onClick={() => setExpandedLeadTimeRows((prev) => ({ ...prev, [idx]: !isExpanded }))}
+                                  >
+                                    {isExpanded ? 'Hide' : 'Show'} PRs
+                                  </Button>
+                                </td>
+                              </tr>
+                              {isExpanded && row.data_points && row.data_points.length > 0 && (
+                                <tr className="bg-blue-50">
+                                  <td colSpan={7} className="border p-2">
+                                    <div className="ml-4">
+                                      <div className="font-semibold mb-2">PR Lead Time Details for {row.date}:</div>
+                                      <div className="space-y-1">
+                                        {row.data_points.map((leadTime, prIdx) => (
+                                          <div key={prIdx} className="text-xs font-mono bg-white p-2 rounded border">
+                                            <span className="text-blue-600">PR #{prIdx + 1}:</span> {leadTime?.toFixed(2) || leadTime} hours
+                                          </div>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  </td>
+                                </tr>
+                              )}
+                            </React.Fragment>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  ) : (
+                    <div className="text-gray-500">No lead time data available</div>
+                  )}
+                </div>
+              </div>
+            ) : source === 'github' && metric === 'deployment_frequency' ? (
+              // GitHub Deployment Frequency Details
+              <div className="max-h-96 overflow-auto text-sm">
+                {!selectedDate ? (
+                  <div className="text-sm text-gray-500">Click a bar on the timeline to view deployments for that date.</div>
+                ) : (
+                  details.deployments && details.deployments.filter((d) => matchesDate(d, selectedDate)).length > 0 ? (
+                    <table className="w-full text-left border-collapse">
+                      <thead className="sticky top-0 bg-gray-100">
+                        <tr>
+                          <th className="border p-2 font-semibold">ID</th>
+                          <th className="border p-2 font-semibold">App Name</th>
+                          <th className="border p-2 font-semibold">Author</th>
+                          <th className="border p-2 font-semibold">Tag/Branch</th>
+                          <th className="border p-2 font-semibold">Environment</th>
+                          <th className="border p-2 font-semibold">Commit IDs</th>
+                          <th className="border p-2 font-semibold">PR Info</th>
+                          <th className="border p-2 font-semibold">Description</th>
+                          <th className="border p-2 font-semibold">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {details.deployments.filter((d) => matchesDate(d, selectedDate)).map((dep, idx) => (
+                          <tr key={idx} className="hover:bg-gray-50">
+                            <td className="border p-2 font-mono text-xs">{dep.id.toString().substring(0, 8)}</td>
+                            <td className="border p-2">{dep.app_name || '-'}</td>
+                            <td className="border p-2">{dep.author || dep.created_by || '-'}</td>
+                            <td className="border p-2">{dep.tag_name || '-'}</td>
+                            <td className="border p-2">
+                              <Badge variant="secondary">{dep.environment || '-'}</Badge>
+                            </td>
+                            <td className="border p-2 font-mono text-xs">
+                              {dep.commit_ids ? (
+                                <Button size="sm" variant="ghost" onClick={() => copyToClipboard(dep.commit_ids)}>
+                                  {dep.commit_ids.substring(0, 20)}...
+                                </Button>
+                              ) : '-'}
+                            </td>
+                            <td className="border p-2 max-w-xs">
+                              {dep.pr_information && dep.pr_information.length > 0 ? (
+                                <div className="space-y-1">
+                                  {dep.pr_information.map((pr, pidx) => (
+                                    <div key={pidx} className="text-xs">
+                                      <a href={pr.url} target="_blank" rel="noreferrer" className="text-blue-600 underline">
+                                        #{pr.number} {pr.title.substring(0, 30)}...
+                                      </a>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : 'No PRs'}
+                            </td>
+                            <td className="border p-2 text-xs">{dep.description || '-'}</td>
+                            <td className="border p-2">
+                              {dep.url && (
+                                <a href={dep.url} target="_blank" rel="noreferrer" className="text-blue-600 underline">
+                                  View
+                                </a>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  ) : (
+                    <div className="text-gray-500">No deployments for selected date</div>
+                  )
+                )}
+              </div>
+            ) : !selectedDate ? (
               <div className="text-sm text-gray-500">Click a bar on the timeline to view deployments, PRs and incidents for that date.</div>
             ) : (
-              <div className="max-h-64 overflow-auto text-sm">
-                {/* combined rows with pagination and drill links */}
+              // ServiceNow or other default view - hide for CFR and MTTR
+              (source === 'servicenow' && (metric === 'change_failure_rate' || metric === 'mean_time_to_recovery')) ? (
+                <div className="text-sm text-gray-500">Event details not available for this metric.</div>
+              ) : (
+                <div className="max-h-64 overflow-auto text-sm">
                 {(() => {
                   const rawRows = [
                     ...(details.deployments || []).filter((d) => matchesDate(d, selectedDate)).map((d) => ({
@@ -447,11 +754,13 @@ const MetricDetails = () => {
                     </div>
                   );
                 })()}
-              </div>
+                </div>
+              )
             )}
           </CardContent>
         </Card>
 
+        {!(source === 'servicenow' && metric === 'change_failure_rate') && !(source === 'github' && metric === 'lead_time') && !(source === 'servicenow' && metric === 'mean_time_to_recovery') && (
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <Card>
             <CardHeader>
@@ -637,6 +946,11 @@ const MetricDetails = () => {
                       <th className="pr-2">ID</th>
                       <th className="pr-2">Opened</th>
                       <th className="pr-2">Closed</th>
+                      <th className="pr-2">PD Service</th>
+                      <th className="pr-2">Incident Priority</th>
+                      <th className="pr-2">Incident Urgency</th>
+                      <th className="pr-2">Alert Severity</th>
+                      <th className="pr-2">Status</th>
                       <th className="pr-2" />
                     </tr>
                   </thead>
@@ -658,6 +972,11 @@ const MetricDetails = () => {
                               <td className="pr-2 py-1 text-xs">{id}</td>
                               <td className="pr-2 py-1 text-xs">{i.opened_at || i.created_at || i.created || '-'}</td>
                               <td className="pr-2 py-1 text-xs">{i.closed_at || i.closed || i.closed_at || '-'}</td>
+                              <td className="pr-2 py-1 text-xs">{i.pd_service || '-'}</td>
+                              <td className="pr-2 py-1 text-xs">{i.incident_priority || '-'}</td>
+                              <td className="pr-2 py-1 text-xs">{i.incident_urgency || '-'}</td>
+                              <td className="pr-2 py-1 text-xs">{i.alert_severity || '-'}</td>
+                              <td className="pr-2 py-1 text-xs">{i.status || '-'}</td>
                               <td className="pr-2 py-1 text-xs">
                                 <div className="flex items-center gap-2">
                                   {link ? <a className="underline text-blue-600" href={link} target="_blank" rel="noreferrer">View</a> : null}
@@ -669,7 +988,7 @@ const MetricDetails = () => {
                             </tr>
                             {isOpen && (
                               <tr className="bg-gray-50">
-                                <td colSpan={4} className="p-2 text-xs">
+                                <td colSpan={9} className="p-2 text-xs">
                                   <pre className="whitespace-pre-wrap text-[11px]">{JSON.stringify(i, null, 2)}</pre>
                                 </td>
                               </tr>
@@ -683,6 +1002,7 @@ const MetricDetails = () => {
             </CardContent>
           </Card>
         </div>
+        )}
       </div>
     </div>
   );

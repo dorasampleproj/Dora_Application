@@ -130,6 +130,46 @@ async function calculateLeadTime(pulls) {
   return leadTimes.reduce((a, b) => a + b, 0) / leadTimes.length;
 }
 
+// Helper function to calculate lead time per day (with average and median)
+async function calculateLeadTimePerDay(pulls) {
+  if (!Array.isArray(pulls) || pulls.length === 0) return [];
+
+  const leadTimesByDate = {};
+
+  pulls.forEach((pr) => {
+    if (pr.merged_at && pr.created_at) {
+      const createdDate = new Date(pr.created_at);
+      const mergedDate = new Date(pr.merged_at);
+      const leadHours = (mergedDate - createdDate) / (1000 * 60 * 60);
+      const dateKey = createdDate.toISOString().split('T')[0];
+
+      if (!leadTimesByDate[dateKey]) {
+        leadTimesByDate[dateKey] = [];
+      }
+      leadTimesByDate[dateKey].push(leadHours);
+    }
+  });
+
+  const leadTimeData = Object.entries(leadTimesByDate)
+    .map(([date, times]) => {
+      const sorted = [...times].sort((a, b) => a - b);
+      const average = times.reduce((a, b) => a + b, 0) / times.length;
+      const median =
+        sorted.length % 2 === 0
+          ? (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2
+          : sorted[Math.floor(sorted.length / 2)];
+
+      return {
+        date,
+        average: Number(average.toFixed(2)),
+        median: Number(median.toFixed(2)),
+      };
+    })
+    .sort((a, b) => new Date(a.date) - new Date(b.date));
+
+  return leadTimeData;
+}
+
 // Helper function to calculate change failure rate
 async function calculateChangeFailureRateSummary(workflowRuns) {
   if (workflowRuns.length === 0) return 0;
@@ -137,6 +177,40 @@ async function calculateChangeFailureRateSummary(workflowRuns) {
   const failedRuns = workflowRuns.filter((run) => run.conclusion === "failure");
   return (failedRuns.length / workflowRuns.length) * 100;
 }
+
+// Helper function to calculate change failure rate breakdown (for pie chart)
+async function calculateChangeFailureRateBreakdown(workflowRuns) {
+  if (workflowRuns.length === 0) {
+    return {
+      successful: 0,
+      failed: 0,
+      total: 0,
+      breakdownData: [
+        { name: "Successful", value: 0, percentage: 0, fill: "#10b981" },
+        { name: "Failed", value: 0, percentage: 0, fill: "#ef4444" },
+      ],
+    };
+  }
+
+  const failedRuns = workflowRuns.filter((run) => run.conclusion === "failure");
+  const successfulRuns = workflowRuns.filter((run) => run.conclusion === "success");
+  const total = workflowRuns.length;
+  const failedCount = failedRuns.length;
+  const successfulCount = successfulRuns.length;
+  const failurePercentage = (failedCount / total) * 100;
+  const successPercentage = (successfulCount / total) * 100;
+
+  return {
+    successful: successfulCount,
+    failed: failedCount,
+    total: total,
+    breakdownData: [
+      { name: "Successful", value: successfulCount, percentage: Number(successPercentage.toFixed(2)), fill: "#10b981" },
+      { name: "Failed", value: failedCount, percentage: Number(failurePercentage.toFixed(2)), fill: "#ef4444" },
+    ],
+  };
+}
+
 async function calculateChangeFailureRate(workflowRuns) {
   if (workflowRuns.length === 0) return 0;
 
@@ -309,12 +383,14 @@ router.get("/metrics", async (req, res) => {
     const totalDeploys = deploymentResult.totalDeploys;
     const deploymentFrequency = totalDeploys / daysWindow; // average deploys per day
     const leadTime = await calculateLeadTime(prsResponse.data);
+    const leadTimePerDay = await calculateLeadTimePerDay(prsResponse.data);
     // Use workflowRuns if available; otherwise use syntheticRuns (which are successful deployments)
     const runsForFailure = await calculateChangeFailureRate(workflowRuns);
     const changeFailureRate = buildDeploymentSeries(workflowRuns, 90, {}, "failure");
     const changeFailureRateToClient = changeFailureRate.rawSeriesFiltered;
     console.log("changeFailureRate:", changeFailureRateToClient);
     const changeFailureRateSummary = await calculateChangeFailureRateSummary(workflowRuns);
+    const changeFailureRateBreakdown = await calculateChangeFailureRateBreakdown(workflowRuns);
     const mttr = await calculateMTTR(issuesResponse.data);
     res.json({
       // time series for charting: raw integer counts per day (date, value)
@@ -325,7 +401,8 @@ router.get("/metrics", async (req, res) => {
         value: deploymentFrequency,
         unit: "deployments per day",
       },
-      lead_time: {
+      lead_time: leadTimePerDay,
+      lead_time_summary: {
         value: leadTime,
         unit: "hours",
       },
@@ -334,6 +411,7 @@ router.get("/metrics", async (req, res) => {
         value: changeFailureRateSummary,
         unit: "percent",
       },
+      change_failure_rate_breakdown: changeFailureRateBreakdown,
       mean_time_to_recovery: {
         value: mttr,
         unit: "hours",
@@ -347,7 +425,7 @@ router.get("/metrics", async (req, res) => {
 // Provide detailed items for the UI 'More Details' view
 router.get('/details', async (req, res) => {
   try {
-    // Reuse existing helpers to fetch recent workflow runs, PRs and issues
+    // Helper to fetch workflow runs with detailed info
     const fetchWorkflowRunsLastNDays = async (owner, repo, days = 90) => {
       const perPage = 100;
       let page = 1;
@@ -375,12 +453,117 @@ router.get('/details', async (req, res) => {
       return results;
     };
 
+    // Fetch workflow runs (deployments)
     const workflowRuns = await fetchWorkflowRunsLastNDays(OWNER, REPO, 90);
-    const prsResponse = await axios.get(`${GITHUB_API}/repos/${OWNER}/${REPO}/pulls?state=all&per_page=100`, githubConfig);
-    const issuesResponse = await axios.get(`${GITHUB_API}/repos/${OWNER}/${REPO}/issues?state=all&per_page=100`, githubConfig);
+    
+    // Fetch PRs and commits
+    const prsResponse = await axios.get(
+      `${GITHUB_API}/repos/${OWNER}/${REPO}/pulls?state=all&per_page=100`,
+      githubConfig
+    );
+    
+    // Fetch commits
+    const commitsResponse = await axios.get(
+      `${GITHUB_API}/repos/${OWNER}/${REPO}/commits?per_page=100`,
+      githubConfig
+    );
+    
+    // Fetch issues for MTTR
+    const issuesResponse = await axios.get(
+      `${GITHUB_API}/repos/${OWNER}/${REPO}/issues?state=all&per_page=100`,
+      githubConfig
+    );
 
-    res.json({ workflow_runs: workflowRuns, pulls: prsResponse.data, issues: issuesResponse.data });
+    // Enhance deployment data with detailed information
+    const enhancedDeployments = workflowRuns.map((run, idx) => {
+      // Find related commits from this workflow run
+      const relatedCommits = commitsResponse.data?.filter((commit) => {
+        const commitDate = new Date(commit.commit.author.date);
+        const runDate = new Date(run.created_at);
+        // Match commits from same day as run
+        return commitDate.toDateString() === runDate.toDateString();
+      }) || [];
+
+      // Find related PRs
+      const relatedPRs = prsResponse.data?.filter((pr) => {
+        const prDate = new Date(pr.merged_at || pr.created_at);
+        const runDate = new Date(run.created_at);
+        return prDate.toDateString() === runDate.toDateString();
+      }) || [];
+
+      return {
+        id: run.id,
+        name: run.name,
+        app_name: REPO,
+        author: run.actor?.name || run.actor?.login || 'Unknown',
+        created_by: run.actor?.login || 'Unknown',
+        tag_name: run.head_branch || 'main',
+        environment: 'production',
+        commit_ids: relatedCommits.map((c) => c.sha.substring(0, 7)).join(', '),
+        commits: relatedCommits.map((c) => ({
+          sha: c.sha,
+          message: c.commit.message,
+          author: c.commit.author.name,
+          url: c.html_url,
+        })),
+        pr_information: relatedPRs.map((pr) => ({
+          number: pr.number,
+          title: pr.title,
+          url: pr.html_url,
+          merged_at: pr.merged_at,
+        })),
+        description: run.conclusion === 'success' ? 'Deployment successful' : `Deployment ${run.conclusion}`,
+        created_at: run.created_at,
+        status: run.conclusion || run.status,
+        conclusion: run.conclusion,
+        url: run.html_url,
+      };
+    });
+
+    // Calculate lead time with average and median
+    const prs = prsResponse.data || [];
+    const leadTimesByDate = {};
+    
+    prs.forEach((pr) => {
+      if (pr.merged_at && pr.created_at) {
+        const createdDate = new Date(pr.created_at);
+        const mergedDate = new Date(pr.merged_at);
+        const leadHours = (mergedDate - createdDate) / (1000 * 60 * 60);
+        const dateKey = createdDate.toISOString().split('T')[0];
+        
+        if (!leadTimesByDate[dateKey]) {
+          leadTimesByDate[dateKey] = [];
+        }
+        leadTimesByDate[dateKey].push(leadHours);
+      }
+    });
+
+    const leadTimeData = Object.entries(leadTimesByDate).map(([date, times]) => {
+      const sorted = [...times].sort((a, b) => a - b);
+      const average = times.reduce((a, b) => a + b, 0) / times.length;
+      const median = sorted.length % 2 === 0
+        ? (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2
+        : sorted[Math.floor(sorted.length / 2)];
+      
+      return {
+        date,
+        average_lead_time: Number(average.toFixed(2)),
+        median_lead_time: Number(median.toFixed(2)),
+        data_points: times.map((t) => Number(t.toFixed(2))),
+      };
+    }).sort((a, b) => new Date(a.date) - new Date(b.date));
+
+    res.json({
+      deployments: enhancedDeployments.filter((d) => d.conclusion === 'success'),
+      lead_time_data: leadTimeData,
+      all_data: {
+        workflow_runs: workflowRuns,
+        pulls: prsResponse.data,
+        issues: issuesResponse.data,
+      },
+    });
   } catch (err) {
+    console.error('Details endpoint error:', err);
     res.status(500).json({ error: err.message });
   }
 });

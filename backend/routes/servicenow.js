@@ -52,6 +52,7 @@ function generateMockData(days = 90) {
         sys_created_on: created.toISOString(),
         implemented_on: implemented,
         result: success ? 'successful' : 'failed',
+        deployment_sys_id: dep.sys_id, // Explicitly link change to deployment
       };
       changes.push(change);
 
@@ -109,10 +110,17 @@ function calculateLeadTimeHours(changes, deploymentsMap) {
   for (const c of changes) {
     const created = new Date(c.sys_created_on);
     let implemented = c.implemented_on ? new Date(c.implemented_on) : null;
-    // try to match via deploymentsMap if no implemented_on
+    
+    // Try to match via the explicit deployment_sys_id field first
+    if (!implemented && c.deployment_sys_id && deploymentsMap && deploymentsMap[c.deployment_sys_id]) {
+      implemented = new Date(deploymentsMap[c.deployment_sys_id]);
+    }
+    
+    // Fallback: try to match via deploymentsMap if no implemented_on or deployment_sys_id
     if (!implemented && deploymentsMap && deploymentsMap[c.sys_id]) {
       implemented = new Date(deploymentsMap[c.sys_id]);
     }
+    
     if (implemented && created) {
       const hours = (implemented - created) / (1000 * 60 * 60);
       if (hours >= 0) leadTimes.push(hours);
@@ -122,10 +130,91 @@ function calculateLeadTimeHours(changes, deploymentsMap) {
   return leadTimes.reduce((a, b) => a + b, 0) / leadTimes.length;
 }
 
+function calculateLeadTimePerDay(changes, deploymentsMap) {
+  const leadTimesByDate = {};
+
+  for (const c of changes) {
+    const created = new Date(c.sys_created_on);
+    let implemented = c.implemented_on ? new Date(c.implemented_on) : null;
+    
+    // Try to match via the explicit deployment_sys_id field first
+    if (!implemented && c.deployment_sys_id && deploymentsMap && deploymentsMap[c.deployment_sys_id]) {
+      implemented = new Date(deploymentsMap[c.deployment_sys_id]);
+    }
+    
+    // Fallback: try to match via deploymentsMap if no implemented_on or deployment_sys_id
+    if (!implemented && deploymentsMap && deploymentsMap[c.sys_id]) {
+      implemented = new Date(deploymentsMap[c.sys_id]);
+    }
+    
+    if (implemented && created) {
+      const hours = (implemented - created) / (1000 * 60 * 60);
+      if (hours >= 0) {
+        const dateKey = created.toISOString().split('T')[0];
+        if (!leadTimesByDate[dateKey]) {
+          leadTimesByDate[dateKey] = [];
+        }
+        leadTimesByDate[dateKey].push(hours);
+      }
+    }
+  }
+
+  const leadTimeData = Object.entries(leadTimesByDate)
+    .map(([date, times]) => {
+      const sorted = [...times].sort((a, b) => a - b);
+      const average = times.reduce((a, b) => a + b, 0) / times.length;
+      const median =
+        sorted.length % 2 === 0
+          ? (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2
+          : sorted[Math.floor(sorted.length / 2)];
+
+      return {
+        date,
+        average: Number(average.toFixed(2)),
+        median: Number(median.toFixed(2)),
+      };
+    })
+    .sort((a, b) => new Date(a.date) - new Date(b.date));
+
+  return leadTimeData;
+}
+
 function calculateChangeFailureRatePercent(changes) {
   if (!changes || changes.length === 0) return 0;
   const failed = changes.filter((c) => c.result && c.result.toLowerCase().includes('fail')).length;
   return (failed / changes.length) * 100;
+}
+
+function calculateChangeFailureRateBreakdown(changes) {
+  if (!changes || changes.length === 0) {
+    return {
+      successful: 0,
+      failed: 0,
+      total: 0,
+      breakdownData: [
+        { name: "Successful", value: 0, percentage: 0, fill: "#10b981" },
+        { name: "Failed", value: 0, percentage: 0, fill: "#ef4444" },
+      ],
+    };
+  }
+
+  const failed = changes.filter((c) => c.result && c.result.toLowerCase().includes('fail'));
+  const successful = changes.filter((c) => c.result && !c.result.toLowerCase().includes('fail'));
+  const total = changes.length;
+  const failedCount = failed.length;
+  const successfulCount = successful.length;
+  const failurePercentage = (failedCount / total) * 100;
+  const successPercentage = (successfulCount / total) * 100;
+
+  return {
+    successful: successfulCount,
+    failed: failedCount,
+    total: total,
+    breakdownData: [
+      { name: "Successful", value: successfulCount, percentage: Number(successPercentage.toFixed(2)), fill: "#10b981" },
+      { name: "Failed", value: failedCount, percentage: Number(failurePercentage.toFixed(2)), fill: "#ef4444" },
+    ],
+  };
 }
 
 function calculateMTTRHours(incidents) {
@@ -150,22 +239,25 @@ router.get('/metrics', async (req, res) => {
     // Build series and totals
     const { series: deployment_series, total: totalDeploys } = buildDeploymentSeriesFromDeployments(deployments, days);
 
-    // create a simple map to attempt matching changes to deployments by sys_id
+    // Create a map of deployment sys_id -> deploy_time for quick lookup
     const deploymentsMap = {};
     for (const d of deployments) {
-      // we don't have change_sys_id in synthetic data; using sys_id mapping from generation
-      deploymentsMap[`cr-${d.sys_id?.split('-')[1] || ''}`] = d.deploy_time;
+      deploymentsMap[d.sys_id] = d.deploy_time;
     }
 
     const leadTime = calculateLeadTimeHours(changes, deploymentsMap);
+    const leadTimePerDay = calculateLeadTimePerDay(changes, deploymentsMap);
     const changeFailureRate = calculateChangeFailureRatePercent(changes);
+    const changeFailureRateBreakdown = calculateChangeFailureRateBreakdown(changes);
     const mttr = calculateMTTRHours(incidents);
 
     res.json({
       deployment_frequency: deployment_series,
       deployment_frequency_summary: { value: totalDeploys, total_deploys: totalDeploys, average_per_day: Number((totalDeploys / Math.max(days,1)).toFixed(2)), unit: 'deploys' },
-      lead_time: { value: Number(leadTime.toFixed(2)), unit: 'hours' },
-      change_failure_rate: { value: Number(changeFailureRate.toFixed(2)), unit: 'percent' },
+      lead_time: leadTimePerDay,
+      lead_time_summary: { value: Number(leadTime.toFixed(2)), unit: 'hours' },
+      change_failure_rate_summary: { value: Number(changeFailureRate.toFixed(2)), unit: 'percent' },
+      change_failure_rate_breakdown: changeFailureRateBreakdown,
       mean_time_to_recovery: { value: Number(mttr.toFixed(2)), unit: 'hours' },
     });
   } catch (err) {
