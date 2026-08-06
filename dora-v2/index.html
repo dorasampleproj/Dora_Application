@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>DORA — Lead time for changes</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg:      #f5f4f1;
+  --surface: #ffffff;
+  --surface2: #f0efe9;
+  --border:  rgba(0,0,0,0.08);
+  --text:    #1a1a18;
+  --muted:   #6b6a65;
+  --hint:    #9c9a92;
+  --acc:     #185FA5;
+  --c-dev:   #0F6E56;
+  --c-sit:   #185FA5;
+  --c-uat:   #854F0B;
+  --c-mo:    #7F77DD;
+  --c-prod:  #A32D2D;
+  --elite:   #0F6E56;
+  --high:    #185FA5;
+  --medium:  #854F0B;
+  --low:     #A32D2D;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:      #181816;
+    --surface: #222220;
+    --surface2: #2a2a28;
+    --border:  rgba(255,255,255,0.07);
+    --text:    #e4e2dc;
+    --muted:   #888680;
+    --hint:    #5c5a54;
+  }
+}
+body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; }
+
+/* ── Header ── */
+header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 14px 24px; background: var(--surface); border-bottom: 0.5px solid var(--border); }
+header h1 { font-size: 15px; font-weight: 500; }
+.hdr-right { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+select, button { font: inherit; font-size: 12px; padding: 5px 10px; border: 0.5px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); cursor: pointer; }
+button.primary { background: var(--acc); color: #fff; border-color: transparent; }
+
+/* ── Summary cards ── */
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; padding: 16px 24px 0; }
+.card { background: var(--surface); border: 0.5px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+.card-label { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+.card-val { font-size: 22px; font-weight: 500; }
+.card-val.Elite  { color: var(--elite); }
+.card-val.High   { color: var(--high); }
+.card-val.Medium { color: var(--medium); }
+.card-val.Low    { color: var(--low); }
+
+/* ── Main table ── */
+.table-wrap { margin: 16px 24px 24px; overflow-x: auto; background: var(--surface); border: 0.5px solid var(--border); border-radius: 12px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 700px; }
+
+th { font-size: 11px; font-weight: 500; color: var(--muted); text-align: left; padding: 10px 14px; border-bottom: 0.5px solid var(--border); white-space: nowrap; background: var(--surface2); }
+th.env-col { text-align: center; min-width: 90px; }
+th.env-col span { display: block; width: 8px; height: 8px; border-radius: 50%; margin: 0 auto 3px; }
+th.env-DEV  span { background: var(--c-dev); }
+th.env-SIT  span { background: var(--c-sit); }
+th.env-UAT  span { background: var(--c-uat); }
+th.env-MO   span { background: var(--c-mo); }
+th.env-PROD span { background: var(--c-prod); }
+
+td { padding: 8px 14px; border-bottom: 0.5px solid var(--border); vertical-align: middle; }
+tr:last-child td { border-bottom: none; }
+
+/* ── Row types ── */
+.row-feature { background: var(--surface2); }
+.row-feature td:first-child { font-weight: 500; }
+.feat-toggle { cursor: pointer; user-select: none; display: flex; align-items: center; gap: 6px; }
+.chevron { display: inline-block; transition: transform .15s; font-style: normal; color: var(--hint); font-size: 10px; }
+.chevron.open { transform: rotate(90deg); }
+
+.row-story td:first-child { padding-left: 28px; }
+.row-story { background: var(--surface); }
+
+.row-build td:first-child { padding-left: 52px; color: var(--muted); font-size: 12px; font-family: monospace; }
+.row-build { background: var(--surface); }
+.row-build td { color: var(--muted); font-size: 12px; }
+
+/* ── Env cells ── */
+.env-cell { text-align: center; font-variant-numeric: tabular-nums; }
+.env-cell .hrs { font-weight: 500; color: var(--text); }
+.env-cell .hrs.row-build { font-weight: 400; color: var(--muted); }
+.env-cell .sub { font-size: 11px; color: var(--hint); }
+.env-empty { color: var(--hint); text-align: center; }
+
+/* ── Badge ── */
+.badge { display: inline-block; font-size: 10px; padding: 2px 7px; border-radius: 20px; font-weight: 500; }
+.badge.Elite  { background: #E1F5EE; color: #085041; }
+.badge.High   { background: #E6F1FB; color: #0C447C; }
+.badge.Medium { background: #FAEEDA; color: #633806; }
+.badge.Low    { background: #FCEBEB; color: #791F1F; }
+
+/* ── Empty / loading ── */
+.state-msg { text-align: center; padding: 48px; color: var(--muted); }
+
+/* ── Legend ── */
+.legend { display: flex; gap: 16px; align-items: center; font-size: 11px; color: var(--muted); padding: 0 24px 12px; flex-wrap: wrap; }
+.legend-item { display: flex; align-items: center; gap: 4px; }
+.legend-dot { width: 7px; height: 7px; border-radius: 50%; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>DORA — Lead time for changes</h1>
+  <div class="hdr-right">
+    <button class="primary" onclick="load()">&#8635; Refresh</button>
+  </div>
+</header>
+
+<div class="cards">
+  <div class="card"><div class="card-label">Total builds</div><div class="card-val" id="s-builds">—</div></div>
+  <div class="card"><div class="card-label">Reached PROD</div><div class="card-val" id="s-prod">—</div></div>
+  <div class="card"><div class="card-label">Avg commit→PROD</div><div class="card-val" id="s-avg">—</div></div>
+  <div class="card"><div class="card-label">DORA rating</div><div class="card-val" id="s-rating">—</div></div>
+</div>
+
+<div class="legend">
+  <span>Cumulative lead time from first commit:</span>
+  <span class="legend-item"><span class="legend-dot" style="background:var(--c-dev)"></span> DEV = T1</span>
+  <span class="legend-item"><span class="legend-dot" style="background:var(--c-sit)"></span> SIT = T1+T2</span>
+  <span class="legend-item"><span class="legend-dot" style="background:var(--c-uat)"></span> UAT = T1+T2+T3</span>
+  <span class="legend-item"><span class="legend-dot" style="background:var(--c-mo)"></span> MO = T1→T4</span>
+  <span class="legend-item"><span class="legend-dot" style="background:var(--c-prod)"></span> PROD = T1→T5</span>
+</div>
+
+<div class="table-wrap">
+  <table id="main-table">
+    <thead>
+      <tr>
+        <th style="min-width:220px">Feature / Story / Build</th>
+        <th class="env-col env-DEV"><span></span>DEV</th>
+        <th class="env-col env-SIT"><span></span>SIT</th>
+        <th class="env-col env-UAT"><span></span>UAT</th>
+        <th class="env-col env-MO"><span></span>MO</th>
+        <th class="env-col env-PROD"><span></span>PROD</th>
+        <th>Rating</th>
+      </tr>
+    </thead>
+    <tbody id="tbody">
+      <tr><td colspan="7" class="state-msg">Loading…</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<script>
+const ENVS = ['DEV','SIT','UAT','MO','PROD'];
+const ENV_COLORS = { DEV:'var(--c-dev)', SIT:'var(--c-sit)', UAT:'var(--c-uat)', MO:'var(--c-mo)', PROD:'var(--c-prod)' };
+
+function fmtHours(secs) {
+  if (secs == null) return null;
+  const h = secs / 3600;
+  if (h < 1)    return (secs / 60).toFixed(0) + 'm';
+  if (h < 24)   return h.toFixed(1) + 'h';
+  return (h / 24).toFixed(1) + 'd';
+}
+
+function doraRate(secs) {
+  if (secs == null) return null;
+  const h = secs / 3600;
+  if (h < 1)   return 'Elite';
+  if (h < 24)  return 'High';
+  if (h < 168) return 'Medium';
+  return 'Low';
+}
+
+function envCell(secs, color, small) {
+  if (secs == null) return `<td class="env-empty">·</td>`;
+  const label = fmtHours(secs);
+  const cls = small ? 'style="color:var(--muted);font-size:12px"' : `style="font-weight:500;color:${color}"`;
+  return `<td class="env-cell"><span ${cls}>${label}</span></td>`;
+}
+
+function ratingCell(secs) {
+  if (secs == null) return `<td></td>`;
+  const r = doraRate(secs);
+  return `<td><span class="badge ${r}">${r}</span></td>`;
+}
+
+// Toggle expand/collapse of a feature's stories
+const expanded = new Set();
+function toggle(featId) {
+  if (expanded.has(featId)) expanded.delete(featId);
+  else expanded.add(featId);
+  renderTable(window._data);
+}
+
+function renderTable(features) {
+  window._data = features;
+  const tbody = document.getElementById('tbody');
+
+  if (!features || !features.length) {
+    tbody.innerHTML = `<tr><td colspan="7" class="state-msg">No data yet. Push a commit with [FEAT-x][US-y] tags to get started.</td></tr>`;
+    return;
+  }
+
+  const rows = [];
+  features.forEach(feat => {
+    const isOpen = expanded.has(feat.feature_id);
+    const chevron = `<i class="chevron ${isOpen ? 'open' : ''}">&#9658;</i>`;
+
+    // Feature row — rollup across all stories
+    const prodSecs = feat.rollup['PROD'];
+    rows.push(`
+      <tr class="row-feature" onclick="toggle('${feat.feature_id}')" style="cursor:pointer">
+        <td><span class="feat-toggle">${chevron} ${feat.feature_id}</span></td>
+        ${ENVS.map(e => envCell(feat.rollup[e], ENV_COLORS[e], false)).join('')}
+        ${ratingCell(prodSecs)}
+      </tr>
+    `);
+
+    if (!isOpen) return;
+
+    feat.stories.forEach(story => {
+      const sProd = story.rollup['PROD'];
+      rows.push(`
+        <tr class="row-story">
+          <td>&#8627; ${story.story_id}</td>
+          ${ENVS.map(e => envCell(story.rollup[e], ENV_COLORS[e], false)).join('')}
+          ${ratingCell(sProd)}
+        </tr>
+      `);
+
+      story.builds.forEach(build => {
+        const bProd = build.milestones['PROD'] ? build.milestones['PROD'].cumulative_seconds : null;
+        rows.push(`
+          <tr class="row-build">
+            <td>${build.build_label}</td>
+            ${ENVS.map(e => {
+              const m = build.milestones[e];
+              return m ? envCell(m.cumulative_seconds, ENV_COLORS[e], true) : `<td class="env-empty">·</td>`;
+            }).join('')}
+            ${ratingCell(bProd)}
+          </tr>
+        `);
+      });
+    });
+  });
+
+  tbody.innerHTML = rows.join('');
+}
+
+async function load() {
+  try {
+    const [features, summary] = await Promise.all([
+      fetch('/api/features').then(r => r.json()),
+      fetch('/api/summary').then(r => r.json())
+    ]);
+
+    // Auto-expand all features on first load
+    if (expanded.size === 0) {
+      features.forEach(f => expanded.add(f.feature_id));
+    }
+
+    renderTable(features);
+
+    document.getElementById('s-builds').textContent = summary.total_builds ?? '—';
+    document.getElementById('s-prod').textContent   = summary.reached_prod ?? '—';
+    document.getElementById('s-avg').textContent    = summary.avg_prod_hours != null
+      ? fmtHours(summary.avg_prod_hours * 3600) : '—';
+
+    const rEl = document.getElementById('s-rating');
+    rEl.textContent  = summary.dora_rating ?? '—';
+    rEl.className    = 'card-val ' + (summary.dora_rating || '');
+  } catch (e) {
+    document.getElementById('tbody').innerHTML =
+      `<tr><td colspan="7" class="state-msg">Failed to load: ${e.message}</td></tr>`;
+  }
+}
+
+load();
+setInterval(load, 60000); // auto-refresh every 60s
+</script>
+</body>
+</html>

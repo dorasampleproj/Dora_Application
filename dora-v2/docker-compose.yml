@@ -1,0 +1,16 @@
+version: "3.8"
+services:
+  dora-collector:
+    build: ./collector
+    ports:
+      - "3000:3000"
+    volumes:
+      - dora-data:/data
+    environment:
+      - PORT=3000
+      - DB_PATH=/data/dora.db
+      - COLLECTOR_TOKEN=${COLLECTOR_TOKEN:-change-me-in-production}
+    restart: unless-stopped
+
+volumes:
+  dora-data:
